@@ -1,5 +1,5 @@
 #!/bin/sh
-# For the maintainer: copies your installed mod and skill back into this repo, so you can commit them.
+# Copies your installed mod and skill back into this clone, so a change you made there can go in a pull request.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 APP="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"

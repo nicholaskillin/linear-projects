@@ -74,6 +74,12 @@ You can also run `/start-issue CAL-123` by hand in any Claude Code session.
 - **Tests:** `node --test mod/orchestrator.test.js`.
 - **License:** `api.js`, `env.js`, `open.js`, and `urls.js` come from the `linear` mod in planningcenter/herdr-mods. They are under the MIT license in `LICENSE.linear-mod`.
 
-## For the maintainer
+## Contributing
 
-You edit the installed mod and skill. To bring your changes into this repo, run `./sync-from-local.sh`, then commit and push.
+Send changes as a pull request. Do not push to `main`.
+
+1. Make a branch in your clone, and change the files in `mod/` or `skills/`.
+2. Run `./install.sh` to try your change in Herdr.
+3. Open a pull request.
+
+If you changed your installed copy instead, `./sync-from-local.sh` copies it back into your clone. Run it on your branch, and check the diff before you commit.
