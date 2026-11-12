@@ -8,7 +8,8 @@ SKILL="$HOME/.claude/skills/start-issue"
 
 mkdir -p "$MOD" "$SKILL"
 cp "$HERE"/mod/* "$MOD"/
-echo "Mod installed:   $MOD"
+cp "$HERE/VERSION" "$MOD/VERSION"
+echo "Mod installed:   $MOD (version $(cat "$HERE/VERSION"))"
 
 if [ -f "$SKILL/SKILL.md" ] && ! cmp -s "$HERE/skills/start-issue/SKILL.md" "$SKILL/SKILL.md"; then
   cp "$SKILL/SKILL.md" "$SKILL/SKILL.md.bak"

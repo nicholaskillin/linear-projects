@@ -52,7 +52,9 @@ You need Herdr and Claude Code. You also need the Linear MCP server in Claude Co
    ```
    To show or hide the panel column, run `herdr-app do layout.toggle '{"id":"panel"}'`.
 
-To update, run `git pull && ./install.sh`, then reload the mod.
+To update, run `git pull && ./install.sh`, then reload the mod. The panel shows the installed version next to the "Projects" title.
+
+To install a fixed version, check out its tag first, for example `git checkout v1.0.0 && ./install.sh`. To go back to the latest, run `git checkout main && git pull && ./install.sh`.
 
 ## The `/start-issue` skill
 
@@ -65,6 +67,23 @@ The mod starts each agent with `claude` in the issue's worktree. The first messa
 It does not commit, push, open a PR, or change Linear. If the work belongs in another repo, it moves to a worktree there and says so in the report.
 
 You can also run `/start-issue CAL-123` by hand in any Claude Code session.
+
+## Versions
+
+The version is in `VERSION`, and `CHANGELOG.md` lists the changes in each version. Each release has a git tag, for example `v1.0.0`, and a GitHub release with the same notes.
+
+The version uses three numbers, MAJOR.MINOR.PATCH:
+
+- **MAJOR** goes up when an update needs you to do something, for example a new layout block or a changed settings file.
+- **MINOR** goes up for new features.
+- **PATCH** goes up for fixes.
+
+To make a release (owner only):
+
+1. Change `VERSION`, and add a section to the top of `CHANGELOG.md`.
+2. Commit, then tag: `git tag v<version>`.
+3. Push with the tag: `git push && git push --tags`.
+4. Make the GitHub release: `gh release create v<version> --notes "<the changelog section>"`.
 
 ## Notes
 
@@ -81,5 +100,7 @@ Send changes as a pull request. Do not push to `main`.
 1. Make a branch in your clone, and change the files in `mod/` or `skills/`.
 2. Run `./install.sh` to try your change in Herdr.
 3. Open a pull request.
+
+Do not change `VERSION` or `CHANGELOG.md` in a pull request. The owner sets the version at release time.
 
 If you changed your installed copy instead, `./sync-from-local.sh` copies it back into your clone. Run it on your branch, and check the diff before you commit.

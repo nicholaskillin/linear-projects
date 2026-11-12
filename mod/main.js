@@ -160,6 +160,12 @@ export default class LinearProjects extends View {
     this.firstPoll = new Set(); // project ids whose new space gets a poll once it appears
     this.starting = new Set(); // issue identifiers
     this.repos = null; this.reposError = null; // null: not loaded yet
+    // install.sh copies the repo's VERSION file into the mod's folder.
+    cx.spawn(async (cx) => {
+      const text = await readTextFile(`${appHome()}/mods/linear-projects/VERSION`).catch(() => null);
+      this.version = text?.trim() || null;
+      cx.notify();
+    });
     cx.spawn(async (cx) => {
       try { await loadConfig(); } catch (e) { notify({ title: "Linear Projects settings", body: String(e.message ?? e), level: "error" }); }
       this.loadRepos(cx);
@@ -645,11 +651,13 @@ export default class LinearProjects extends View {
     return div().p(10).text_size(12).whitespace_normal().text_color(error ? t.ansi1 : t.dim).child(text);
   }
 
-  header(title, t, { back, subtitle } = {}) {
+  header(title, t, { back, subtitle, version } = {}) {
     return h_flex().h(42).flex_none().px(10).gap(8).items_center().border_b(1).border_color(t.border)
       .when(Boolean(back), (e) => e.child(div().id("back").px(6).h(26).flex().items_center().rounded(6).cursor_pointer()
         .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => back(cx)).child("‹ Back")))
-      .child(div().flex_1().min_w(0).truncate().font_semibold().child(title))
+      .child(h_flex().flex_1().min_w(0).gap(6).items_baseline()
+        .child(div().min_w(0).truncate().font_semibold().child(title))
+        .when(Boolean(version), (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(`v${version}`))))
       .when(Boolean(subtitle), (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(subtitle ?? "")))
       .child(div().id("refresh").size(26).flex().flex_none().items_center().justify_center().rounded(7).cursor_pointer()
         .text_color(t.muted).tooltip("Refresh").hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -682,7 +690,7 @@ export default class LinearProjects extends View {
     else if (!this.projectsLoaded) body = this.message("Loading…", t);
     else if (!groups.length) body = this.message(this.leadOnly ? "You lead no projects here. Turn off Lead to see all." : "No projects", t);
     return v_flex().size_full().min_h(0)
-      .child(this.header("Projects", t, { subtitle: this.projectsLoaded ? String(shown.length) : "" }))
+      .child(this.header("Projects", t, { subtitle: this.projectsLoaded ? String(shown.length) : "", version: this.version }))
       .child(h_flex().flex_none().px(8).py(7).gap(6).border_b(1).border_color(t.border)
         .child(this.chip("filter-lead", "Lead", this.leadOnly, () => { this.leadOnly = !this.leadOnly; }, t))
         .child(this.chip("filter-all", "Show all", this.showAll, () => { this.showAll = !this.showAll; }, t)))
