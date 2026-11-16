@@ -6,7 +6,7 @@ const PAGE_SIZE = 100;
 export const MAX_PAGES = 10;
 export const COMMENTS_SHOWN = 10;
 
-export const VIEWER_QUERY = `{ viewer { id teams(first: 100) { nodes { id key } } } }`;
+export const VIEWER_QUERY = `{ viewer { id teams(first: 100) { nodes { id key } } organization { urlKey } } }`;
 
 export const TEAM_PROJECTS_QUERY = `query($team: String!, $after: String) {
   team(id: $team) {
@@ -18,8 +18,8 @@ export const TEAM_PROJECTS_QUERY = `query($team: String!, $after: String) {
 }`;
 
 const ISSUE_FIELDS = `id identifier title url priority priorityLabel branchName sortOrder
-  state { name type color } team { id key } assignee { id name } labels { nodes { name color } }
-  projectMilestone { id name sortOrder }`;
+  state { name type color position } team { id key } assignee { id name } labels { nodes { name color } }
+  project { id } projectMilestone { id name sortOrder } slaMediumRiskAt slaHighRiskAt slaBreachesAt`;
 
 const BLOCKERS = `inverseRelations(first: 20) { nodes { type issue { identifier state { type } } } }`;
 
@@ -31,6 +31,36 @@ export const PROJECT_ISSUES_QUERY = `query($id: String!, $after: String) {
     }
   }
 }`;
+
+export const TEAM_NO_PROJECT_ISSUES_QUERY = `query($team: String!, $after: String) {
+  issues(first: ${PAGE_SIZE}, after: $after, filter: {
+    team: { key: { eq: $team } }, project: { null: true }, state: { type: { nin: ["completed", "canceled", "duplicate"] } }
+  }) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ${ISSUE_FIELDS} ${BLOCKERS} }
+  }
+}`;
+
+// A team view lists a team's open issues that are in no project. It acts as a project everywhere in the
+// mod (settings, space, polls), so its ID lives in the same place as project IDs.
+const TEAM_VIEW_PREFIX = "team:";
+export const teamViewId = (teamKey) => `${TEAM_VIEW_PREFIX}${teamKey}`;
+export const teamKeyOf = (projectId) => (projectId?.startsWith(TEAM_VIEW_PREFIX) ? projectId.slice(TEAM_VIEW_PREFIX.length) : null);
+
+// `teamViews` in linear-projects.json: [{ "name": "Calendar Core", "team": "CAL" }]. Bad entries are skipped.
+export function parseTeamViews(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((v) => typeof v?.name === "string" && v.name.trim() && typeof v?.team === "string" && v.team.trim())
+    .map((v) => ({ name: v.name.trim(), team: v.team.trim().toUpperCase() }));
+}
+
+export function teamViewProject({ name, team }, orgUrlKey) {
+  return {
+    id: teamViewId(team), name, teamKey: team, url: orgUrlKey ? `https://linear.app/${orgUrlKey}/team/${team}/all` : null,
+    progress: 0, targetDate: null, status: "", statusType: "", statusColor: null, leadId: null, leadName: null,
+  };
+}
 
 // Linear's comment order is not documented as newest-first, so the page sorts them itself.
 export const ISSUE_QUERY = `query($id: String!) {
@@ -85,10 +115,11 @@ export function parseIssue(n) {
     blockedBy: (n.inverseRelations?.nodes ?? [])
       .filter((r) => r.type === "blocks" && !CLOSED_STATE_TYPES.includes(r.issue?.state?.type))
       .map((r) => r.issue.identifier),
-    state: n.state?.name ?? "", stateType: n.state?.type ?? "", stateColor: n.state?.color ?? null,
-    teamId: n.team?.id ?? null, assigneeId: n.assignee?.id ?? null, assigneeName: n.assignee?.name ?? null,
+    state: n.state?.name ?? "", stateType: n.state?.type ?? "", stateColor: n.state?.color ?? null, statePosition: n.state?.position ?? 0,
+    teamId: n.team?.id ?? null, teamKey: n.team?.key ?? null, assigneeId: n.assignee?.id ?? null, assigneeName: n.assignee?.name ?? null,
     labels: (n.labels?.nodes ?? []).map((l) => ({ name: l.name, color: l.color })),
     description: n.description ?? null, projectId: n.project?.id ?? null,
+    sla: n.slaBreachesAt ? { mediumRiskAt: n.slaMediumRiskAt, highRiskAt: n.slaHighRiskAt, breachesAt: n.slaBreachesAt } : null,
     milestone: n.projectMilestone
       ? { id: n.projectMilestone.id, name: n.projectMilestone.name, sortOrder: n.projectMilestone.sortOrder ?? 0 }
       : null,
@@ -99,6 +130,35 @@ export function parseIssue(n) {
 export function groupBy(items, groups, typeOf) {
   return groups.map(([type, label]) => ({ type, label, items: items.filter((i) => typeOf(i) === type) }))
     .filter((g) => g.items.length);
+}
+
+// A team can have several statuses of one type, for example "In Progress" and "In Review" are both
+// "started". So each type splits into one group per status name, in Linear's order. Teams in one project
+// can share a status name, and then their issues share the group.
+export function issueGroups(issues) {
+  return ISSUE_GROUPS.flatMap(([type]) => {
+    const byState = new Map();
+    for (const issue of issues.filter((i) => i.stateType === type)) {
+      const group = byState.get(issue.state)
+        ?? byState.set(issue.state, { key: `${type}:${issue.state}`, type, label: issue.state, position: issue.statePosition, items: [] }).get(issue.state);
+      group.position = Math.min(group.position, issue.statePosition);
+      group.items.push(issue);
+    }
+    return [...byState.values()].sort((a, b) => a.position - b.position);
+  });
+}
+
+// The issueUpdate input that makes an issue yours and in progress: the team's first "started" status,
+// for example "In Progress". Null when it already is both.
+export function claimInput(issue, viewerId, sortedStates) {
+  const input = {};
+  if (issue.assigneeId !== viewerId) input.assigneeId = viewerId;
+  if (issue.stateType !== "started") {
+    const inProgress = sortedStates.find((s) => s.type === "started");
+    if (!inProgress) throw new Error("the team has no started status");
+    input.stateId = inProgress.id;
+  }
+  return Object.keys(input).length ? input : null;
 }
 
 export const milestoneNumber = (name) => {
@@ -141,9 +201,21 @@ export function shortDate(isoDate) {
   return month && day ? `${MONTHS[month - 1]} ${day}` : "";
 }
 
-export function ago(iso, now = Date.now()) {
-  const minutes = Math.max(0, Math.round((now - Date.parse(iso)) / 60000));
+function shortDuration(ms) {
+  const minutes = Math.max(0, Math.round(ms / 60000));
   if (minutes < 60) return `${minutes}m`;
   if (minutes < 1440) return `${Math.round(minutes / 60)}h`;
   return `${Math.round(minutes / 1440)}d`;
+}
+
+export const ago = (iso, now = Date.now()) => shortDuration(now - Date.parse(iso));
+
+// Linear's risk levels for an SLA, from the times it sets: "low" before medium risk, then "medium",
+// "high" and "breached". Null for an issue with no SLA.
+export function slaStatus(sla, now = Date.now()) {
+  if (!sla) return null;
+  const breachesAt = Date.parse(sla.breachesAt);
+  if (now >= breachesAt) return { level: "breached", label: `SLA breached ${shortDuration(now - breachesAt)} ago` };
+  const level = now >= Date.parse(sla.highRiskAt) ? "high" : now >= Date.parse(sla.mediumRiskAt) ? "medium" : "low";
+  return { level, label: `SLA ${shortDuration(breachesAt - now)} left` };
 }

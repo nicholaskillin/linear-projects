@@ -6,12 +6,15 @@ A Herdr panel for Linear projects that also runs your issue agents. Each Herdr s
 
 - **Projects list:** the projects of all your Linear teams. "Lead" shows only the projects you lead, and "Show all" adds completed and canceled projects.
 - **Follows Herdr:** when you switch to a space, the panel shows that space's project. When you switch to a tab named after an issue ID, for example `CAL-123`, the panel shows that issue.
+- **Team views:** a team's open issues that are in no project, listed at the top of the projects list, for example "Calendar Core" for CAL. Set them with `teamViews` (see Install). A team view acts as a project: it can have a space, settings and polls.
 - **Project page:**
-  - Open issues, grouped by status and then by milestone.
+  - Open issues, grouped by status and then by milestone. Each status has its own group, in Linear's order, so "In Progress" and "In Review" are separate.
   - Status groups that you can collapse.
-  - A "Mine" filter.
+  - "Mine" and "Unassigned" filters.
   - A red ⊘ on blocked issues.
+  - The SLA of an issue that has one, for example "SLA 2d left" or "SLA breached 3h ago", in Linear's risk colors.
   - Buttons: "Start" or "Open" (an issue's agent tab), and "Assign myself".
+- **Start:** when an issue's agent starts, the mod assigns the issue to you and sets the team's first "started" status, for example "In Progress". It does not move an issue that is already started, for example "In Review". This applies to Start, "Assign & start" and polls. A Start on someone else's issue makes you the assignee.
 - **Issue page:**
   - Click the title or the description to edit it.
   - Change the status, and assign or unassign yourself.
@@ -20,7 +23,7 @@ A Herdr panel for Linear projects that also runs your issue agents. Each Herdr s
   - "Max": the number of issue tabs that can be open at the same time.
   - "Repo": the repo for new worktrees. An issue can also pick its own repo on the issue page.
 - **Polling box:** a poll interval from 1 minute to 2 hours, Pause/Resume, and Poll now. Each poll does these steps:
-  1. It closes the tab of each issue that is Done or Canceled, and force-removes that issue's worktree. The local branch stays.
+  1. It closes the tab of each issue that is Done or Canceled, and force-removes that issue's worktree. The local branch stays. Herdr closes a space with its last tab, so before the last issue tab closes, the poll opens a shell tab in the space.
   2. It starts your ready issues in the free slots. Ready means Todo, assigned to you, no open "blocked by" issue, and no tab yet. The order is milestone number, then priority, then Linear's order.
   3. It does not start unassigned issues. When none of your issues is ready, a "Ready to pick up" row shows the unassigned ones, each with "Assign & start".
 - **Create space:** for a project with no space, this makes a worktree of the project's repo named after the project, and a space in it.
@@ -46,6 +49,7 @@ You need Herdr and Claude Code. You also need the Linear MCP server in Claude Co
 3. Optional: copy `linear-projects.example.json` to `~/.config/herdr-app/linear-projects.json`, and change it:
    - `codeDir`: the folder under your home folder that holds your git repos. The default is `Code`.
    - `defaultRepo`: the repo that "Create space" uses when a project has no repo. Without it, pick the project's repo first.
+   - `teamViews`: team views to list, each with a `name` and a team key, for example `[{ "name": "Calendar Core", "team": "CAL" }]`. The mod reads this file again at each refresh.
 4. Add the panel to your layout. In your layout file under `~/.config/herdr-app/layouts/`, add this block to a column, for example the right `panel` column:
    ```json
    { "id": "linear-projects", "type": "block", "size": { "weight": 1 }, "min": 160, "content": { "mod": "linear-projects" } }
@@ -90,7 +94,7 @@ To make a release (owner only):
 - **Herdr must be open.** The mod does the timing, so polls run only while Herdr is open.
 - **Force cleanup.** When an issue is Done or Canceled, the cleanup runs `git worktree remove --force`. Changes that are not committed in that worktree are lost.
 - **Saved state.** The mod saves the space links, the project settings, and the repo choices in Herdr's `shared.json`, on your computer only.
-- **Tests:** `node --test mod/orchestrator.test.js`.
+- **Tests:** `node --test mod/linear.test.js mod/orchestrator.test.js`.
 - **License:** `api.js`, `env.js`, `open.js`, and `urls.js` come from the `linear` mod in planningcenter/herdr-mods. They are under the MIT license in `LICENSE.linear-mod`.
 
 ## Contributing

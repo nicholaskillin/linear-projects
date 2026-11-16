@@ -1,1 +1,5 @@
-{ "codeDir": "Code", "defaultRepo": "calendar" }
+{
+  "codeDir": "Code",
+  "defaultRepo": "calendar",
+  "teamViews": [{ "name": "Calendar Core", "team": "CAL" }]
+}

@@ -6,8 +6,9 @@ import { spaces, panes, agents, run, exec, home, appHome, readTextFile, shared, 
 import { loadApiKey, gql } from "./api.js";
 import {
   VIEWER_QUERY, TEAM_PROJECTS_QUERY, ASSIGN, UNASSIGN, UPDATE_ISSUE, PROJECT_ISSUES_QUERY, ISSUE_QUERY, ISSUE_STATE_QUERY, BRANCH_ISSUE_QUERY, TEAM_STATES_QUERY, MAX_PAGES,
-  PROJECT_GROUPS, ACTIVE_PROJECT_TYPES, ISSUE_GROUPS, CLOSED_STATE_TYPES, parseProject, parseIssue, sortStates, groupBy,
-  milestoneGroups, byName, identifierOf, projectIdForSpace, shortDate, ago,
+  TEAM_NO_PROJECT_ISSUES_QUERY, teamViewId, teamKeyOf, parseTeamViews, teamViewProject,
+  PROJECT_GROUPS, ACTIVE_PROJECT_TYPES, CLOSED_STATE_TYPES, parseProject, parseIssue, sortStates, groupBy, issueGroups,
+  milestoneGroups, byName, identifierOf, projectIdForSpace, shortDate, ago, slaStatus, claimInput,
 } from "./linear.js";
 import { issueTabs, readyIssues, parseWorktrees, sweepCandidates, worktreeSlug, startTask } from "./orchestrator.js";
 import { StatusMenu, STATUS_MENU_WIDTH, statusMenuHeight } from "./status-menu.js";
@@ -52,7 +53,7 @@ function pollLabel(minutes) {
 // codeDir is under the home folder and holds the repos the repo menu lists. defaultRepo is the repo
 // "Create space" uses when the project has none; without it, the project must pick a repo first.
 const CONFIG_FILE = "linear-projects.json";
-const config = { codeDir: "Code", defaultRepo: null };
+const config = { codeDir: "Code", defaultRepo: null, teamViews: [] };
 
 async function loadConfig() {
   const text = await readTextFile(`${appHome()}/${CONFIG_FILE}`).catch(() => null);
@@ -61,6 +62,7 @@ async function loadConfig() {
   try { raw = JSON.parse(text); } catch { throw new Error(`${CONFIG_FILE} is not valid JSON`); }
   if (typeof raw?.codeDir === "string" && raw.codeDir.trim()) config.codeDir = raw.codeDir.trim().replace(/^~\//, "").replace(/\/+$/, "");
   if (typeof raw?.defaultRepo === "string" && raw.defaultRepo.trim()) config.defaultRepo = raw.defaultRepo.trim();
+  config.teamViews = parseTeamViews(raw?.teamViews);
 }
 
 const codeDir = () => (config.codeDir.startsWith("/") ? config.codeDir : `${home()}/${config.codeDir}`);
@@ -183,7 +185,8 @@ export default class LinearProjects extends View {
     this.descriptionInput = TextareaState.new({ placeholder: "Description (Markdown)" });
     this.descriptionInput.set_auto_grow(6, 30);
     this.view = { kind: "list" }; this.followKey = null; this.pageGeneration = 0;
-    this.leadOnly = true; this.showAll = false; this.mineOnly = false;
+    this.leadOnly = true; this.showAll = false;
+    this.assigneeFilter = null; // null, "mine" or "unassigned"
     this.collapsed = loadCollapsed();
     this.polls = new Map(); // project id -> { at, result }; the clock starts when the mod loads
     cx.timer.every(POLL_CHECK_MS, (cx) => { this.pollDueProjects(cx); if (this.view.kind === "project") cx.notify(); });
@@ -207,7 +210,11 @@ export default class LinearProjects extends View {
         const perTeam = await Promise.all(viewer.teams.nodes.map((team) =>
           allPages(this.apiKey, TEAM_PROJECTS_QUERY, { team: team.id }, (d) => d.team.projects)));
         const unique = new Map(perTeam.flat().map((n) => [n.id, parseProject(n)]));
-        this.projects = [...unique.values()].sort(byName);
+        // Read again on each refresh: the settings file is outside the mod's folder, so editing it does not reload the mod.
+        // The load in init already showed any error once.
+        try { await loadConfig(); } catch (e) { if (manual) notify({ title: "Linear Projects settings", body: String(e.message ?? e), level: "error" }); }
+        const teamViews = config.teamViews.map((v) => teamViewProject(v, viewer.organization?.urlKey));
+        this.projects = [...unique.values()].sort(byName).concat(teamViews);
         this.error = null;
       } catch (e) { this.error = String(e.message ?? e); }
       finally { this.loadingProjects = false; this.projectsLoaded = true; cx.notify(); }
@@ -271,8 +278,7 @@ export default class LinearProjects extends View {
       try {
         this.apiKey ??= await loadApiKey();
         if (view.kind === "project") {
-          const nodes = await allPages(this.apiKey, PROJECT_ISSUES_QUERY, { id: view.id }, (d) => d.project.issues);
-          this.issuesByProject.set(view.id, nodes.map(parseIssue));
+          this.issuesByProject.set(view.id, await this.fetchIssues(view.id));
         } else {
           const data = await gql(this.apiKey, ISSUE_QUERY, { id: view.ident });
           if (!data.issue) throw new Error(`${view.ident} not found in Linear`);
@@ -282,6 +288,21 @@ export default class LinearProjects extends View {
       } catch (e) { if (generation === this.pageGeneration) this.pageError = String(e.message ?? e); }
       finally { if (generation === this.pageGeneration) this.loadingPage = false; cx.notify(); }
     });
+  }
+
+  async fetchIssues(projectId) {
+    const teamKey = teamKeyOf(projectId);
+    const nodes = teamKey
+      ? await allPages(this.apiKey, TEAM_NO_PROJECT_ISSUES_QUERY, { team: teamKey }, (d) => d.issues)
+      : await allPages(this.apiKey, PROJECT_ISSUES_QUERY, { id: projectId }, (d) => d.project.issues);
+    return nodes.map(parseIssue);
+  }
+
+  // An issue in no project belongs to its team's view, when there is one.
+  projectIdOf(issue) {
+    if (issue?.projectId) return issue.projectId;
+    const viewId = issue?.teamKey && teamViewId(issue.teamKey);
+    return viewId && this.projects.some((p) => p.id === viewId) ? viewId : null;
   }
 
   statesFor(teamId) {
@@ -365,7 +386,7 @@ export default class LinearProjects extends View {
     this.apiKey ??= await loadApiKey();
     if (!this.viewerId) throw new Error("your Linear user is not loaded yet");
     const { maxAgents } = settingsFor(projectId);
-    const issues = (await allPages(this.apiKey, PROJECT_ISSUES_QUERY, { id: projectId }, (d) => d.project.issues)).map(parseIssue);
+    const issues = await this.fetchIssues(projectId);
     this.issuesByProject.set(projectId, issues);
 
     const openIdents = new Set(issues.map((i) => i.identifier)), projectSpaces = this.projectSpaces(projectId);
@@ -375,17 +396,18 @@ export default class LinearProjects extends View {
       if (!issue || !CLOSED_STATE_TYPES.includes(issue.state.type)) continue;
       const agent = agents().find((a) => a.tab === tab.id);
       if (agent && AGENT_BUSY.includes(agent.status)) continue; // try again at the next poll
-      await this.cleanUp(tabSpace, tab, issue.branchName);
-      cleaned.push(ident);
+      if (await this.cleanUp(tabSpace, tab, issue.branchName, projectId)) cleaned.push(ident);
     }
     const swept = await this.sweepOrphans();
 
     const openTabs = tabs.length - cleaned.length;
     const tabIdents = new Set(spaces().flatMap((s) => s.tabs.map(identifierOf)).filter(Boolean));
     const picks = readyIssues(issues, { assigneeId: this.viewerId, tabIdents }).slice(0, Math.max(0, maxAgents - openTabs));
+    const startSpace = this.spacesByProject().get(projectId);
+    if (picks.length && !startSpace) throw new Error("the project's space closed during the poll");
     const started = [];
     for (const issue of picks) {
-      try { await this.startIssue(issue, space, projectId); started.push(issue.identifier); }
+      try { await this.startIssue(issue, startSpace, projectId); await this.claimOnStart(issue); started.push(issue.identifier); }
       catch (e) { notify({ title: `Could not start ${issue.identifier}`, body: String(e.message ?? e), level: "error" }); }
     }
     return [
@@ -425,9 +447,11 @@ export default class LinearProjects extends View {
   // Closing the tab also ends its terminals, so a `box worktree server` there stops first. The local
   // branch stays: it holds any commits that are not pushed.
   // An agent can move its issue to another repo, so this looks in every repo for worktrees on the branch.
-  async cleanUp(space, tab, branch) {
+  // False when the tab stays open.
+  async cleanUp(space, tab, branch, projectId) {
+    if (!(await this.keepSpaceOpen(space, tab, projectId))) return false;
     run("tab.close", { id: tab.id, confirmed: true });
-    if (!branch) return;
+    if (!branch) return true;
     const removed = new Set();
     for (const folder of [space.folder, ...this.repos.map(repoPath)]) {
       const listed = await exec("git", ["-C", folder, "worktree", "list", "--porcelain"]).catch(() => null);
@@ -438,6 +462,31 @@ export default class LinearProjects extends View {
         removed.add(w.path);
       }
     }
+    return true;
+  }
+
+  // Herdr closes a space with its last tab, and that also drops the space's link to its project. So
+  // before the last tab closes, this opens a shell tab in the space. False if that tab does not open.
+  // The sidebar nests a space under its repo only when the first terminal is in a worktree, so in a
+  // space made on the main checkout the shell starts in the project's worktree.
+  async keepSpaceOpen(space, tab, projectId) {
+    const tabIds = () => spaces().find((s) => s.id === space.id)?.tabs.map((t) => t.id) ?? [];
+    const before = tabIds();
+    if (before.some((id) => id !== tab.id)) return true;
+    run("tab.new", { space: space.id, folder: await this.shellFolder(space, projectId), focus: false });
+    for (let i = 0; i < 40; i++) {
+      if (tabIds().some((id) => !before.includes(id))) return true;
+      await sleep(0.25);
+    }
+    notify({ title: `Kept the ${tab.name} tab open`, body: "It is the last tab in its space, and a new shell tab did not open.", level: "error" });
+    return false;
+  }
+
+  async shellFolder(space, projectId) {
+    const project = this.projects.find((p) => p.id === projectId);
+    const repo = await repoNameOf(space.folder);
+    if (!project || !repo || space.folder !== repoPath(repo)) return space.folder;
+    return ensureProjectWorktree(repo, project).catch(() => space.folder);
   }
 
   // The issue's own choice, else the project's, else null for the space's repo.
@@ -447,7 +496,7 @@ export default class LinearProjects extends View {
 
   // An issue whose repo is not the project space's repo starts in the project's space for that repo,
   // which this makes on first use.
-  async startIssue(issue, space, projectId = issue.projectId ?? projectIdForSpace(space, this.projects, links())) {
+  async startIssue(issue, space, projectId = this.projectIdOf(issue) ?? projectIdForSpace(space, this.projects, links())) {
     this.starting.add(issue.identifier);
     try {
       const project = this.projects.find((p) => p.id === projectId);
@@ -514,7 +563,9 @@ export default class LinearProjects extends View {
         if (!data.issueUpdate.success) throw new Error("Linear did not assign the issue");
         issue.assigneeId = this.viewerId;
         this.starting.delete(issue.identifier);
-        await this.startIssue(issue, space);
+        const projectId = this.projectIdOf(issue) ?? projectIdForSpace(space, this.projects, links());
+        await this.startIssue(issue, space, projectId);
+        await this.claimOnStart(issue);
       } catch (e) { notify({ title: `Could not start ${issue.identifier}`, body: String(e.message ?? e), level: "error" }); }
       finally { this.starting.delete(issue.identifier); this.loadPage(cx); cx.notify(); }
     });
@@ -556,15 +607,33 @@ export default class LinearProjects extends View {
       run("space.select", { id: existing.spaceId });
       return run("tab.select", { id: existing.id });
     }
-    const projectId = issue.projectId ?? (this.view.kind === "project" ? this.view.id : projectIdForSpace(activeSpace(), this.projects, links()));
+    const projectId = this.projectIdOf(issue) ?? (this.view.kind === "project" ? this.view.id : projectIdForSpace(activeSpace(), this.projects, links()));
     const space = (projectId && this.spacesByProject().get(projectId)) ?? null;
     if (this.starting.has(issue.identifier)) return;
     cx.spawn(async (cx) => {
-      try { await this.startIssue(issue, space, projectId); }
-      catch (e) { notify({ title: `Could not start ${issue.identifier}`, body: String(e.message ?? e), level: "error" }); }
+      try {
+        await this.startIssue(issue, space, projectId);
+        await this.claimOnStart(issue);
+      } catch (e) { notify({ title: `Could not start ${issue.identifier}`, body: String(e.message ?? e), level: "error" }); }
+      this.loadPage(cx);
       cx.notify();
     });
     cx.notify();
+  }
+
+  // A team view has no project lead to hand out its issues, so starting one there is how you take it:
+  // the issue becomes yours and in progress. This runs after the tab starts, so a failed start changes
+  // nothing in Linear.
+  async claimOnStart(issue) {
+    try {
+      const input = claimInput(issue, this.viewerId, await this.statesFor(issue.teamId));
+      if (!input) return;
+      const data = await gql(this.apiKey, UPDATE_ISSUE, { id: issue.id, input });
+      if (!data.issueUpdate.success) throw new Error("Linear did not save the change");
+      if (input.assigneeId) Object.assign(issue, { assigneeId: this.viewerId, assigneeName: "You" });
+    } catch (e) {
+      notify({ title: `Started ${issue.identifier}, but could not assign it or set In Progress`, body: String(e.message ?? e), level: "error" });
+    }
   }
 
   startLabel(issue, tab) {
@@ -664,7 +733,7 @@ export default class LinearProjects extends View {
 
   issueGroupHeader(group, key, t) {
     const open = !this.collapsed.has(key);
-    return h_flex().id(`group-${group.type}`).flex_none().h(28).px(8).mt(4).gap(6).items_center().rounded(6).cursor_pointer()
+    return h_flex().id(`group-${group.key}`).flex_none().h(28).px(8).mt(4).gap(6).items_center().rounded(6).cursor_pointer()
       .bg(t.raised).hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => {
         if (open) this.collapsed.add(key); else this.collapsed.delete(key);
@@ -698,8 +767,8 @@ export default class LinearProjects extends View {
 
   projectRow(project, t, spaceByProject) {
     const space = spaceByProject.get(project.id);
-    const meta = [`${Math.round(project.progress * 100)}%`, shortDate(project.targetDate), !this.leadOnly && project.leadName]
-      .filter(Boolean).join(" · ");
+    const meta = project.teamKey ? `${project.teamKey} issues in no project`
+      : [`${Math.round(project.progress * 100)}%`, shortDate(project.targetDate), !this.leadOnly && project.leadName].filter(Boolean).join(" · ");
     return v_flex().id(`project-${project.id}`).flex_none().px(10).py(7).gap(3).rounded(7).cursor_pointer()
       .when(Boolean(space?.active), (e) => e.bg(t.selected))
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.go({ kind: "project", id: project.id }, cx))
@@ -713,6 +782,7 @@ export default class LinearProjects extends View {
   listPage(t) {
     const types = this.showAll ? PROJECT_GROUPS.map(([type]) => type) : ACTIVE_PROJECT_TYPES;
     const shown = this.projects.filter((p) => types.includes(p.statusType) && (!this.leadOnly || p.leadId === this.viewerId));
+    const teamViews = this.projects.filter((p) => p.teamKey);
     const spaceByProject = this.spacesByProject();
     const groups = groupBy(shown, PROJECT_GROUPS, (p) => p.statusType);
     let body;
@@ -725,6 +795,7 @@ export default class LinearProjects extends View {
         .child(this.chip("filter-lead", "Lead", this.leadOnly, () => { this.leadOnly = !this.leadOnly; }, t))
         .child(this.chip("filter-all", "Show all", this.showAll, () => { this.showAll = !this.showAll; }, t)))
       .child(v_flex().id("project-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
+        .children(teamViews.map((p) => this.projectRow(p, t, spaceByProject)))
         .when(Boolean(body), (e) => e.child(body))
         .children(groups.flatMap((g) => [this.groupHeading(g.label, g.items.length, t), ...g.items.map((p) => this.projectRow(p, t, spaceByProject))])));
   }
@@ -881,7 +952,7 @@ export default class LinearProjects extends View {
   }
 
   issueRepoChip(issue, t, cx) {
-    const projectId = issue.projectId ?? projectIdForSpace(activeSpace(), this.projects, links());
+    const projectId = this.projectIdOf(issue) ?? projectIdForSpace(activeSpace(), this.projects, links());
     const current = (shared(ISSUE_REPOS_KEY) ?? {})[issue.identifier] ?? null;
     const fallback = (projectId && settingsFor(projectId).repo) || (projectId ? this.projectRepoFallback(projectId, cx) : this.spaceRepo(activeSpace(), cx));
     return this.repoChip("issue-repo", current, fallback,
@@ -903,6 +974,17 @@ export default class LinearProjects extends View {
       .child(div().text_size(9).text_color(t.dim).child("▾"));
   }
 
+  slaChip(issue, t) {
+    const status = slaStatus(issue.sla);
+    if (!status) return null;
+    const color = { breached: t.ansi1, high: t.ansi1, medium: t.ansi3, low: t.dim }[status.level];
+    const at = new Date(issue.sla.breachesAt), pad = (n) => String(n).padStart(2, "0");
+    const due = `${shortDate(`${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`)}, ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+    return div().id(`sla-${issue.id}`).flex_none().px(5).rounded(4).border_1().border_color(color).text_color(color)
+      .when(status.level === "breached", (e) => e.font_semibold())
+      .tooltip(`${status.level === "breached" ? "Breached" : "Breaches"} ${due}`).child(status.label);
+  }
+
   issueRow(issue, t) {
     const tab = this.tabFor(issue.identifier);
     return v_flex().id(`issue-${issue.id}`).flex_none().px(10).py(7).gap(3).rounded(7).cursor_pointer()
@@ -914,7 +996,7 @@ export default class LinearProjects extends View {
         .child(div().flex_1().min_w(0).whitespace_normal().child(issue.title))
         .child(this.button(`tab-${issue.id}`, this.startLabel(issue, tab), (cx) => this.startTab(issue, cx), t, { accent: !tab })))
       .child(h_flex().gap(8).items_center().text_size(11).text_color(t.dim)
-        .child(this.statusChip(issue, t))
+        .child(this.statusChip(issue, t)).children([this.slaChip(issue, t)].filter(Boolean))
         .child(div().flex_1())
         .child(div().flex_none().child(issue.assigneeId === this.viewerId ? "You" : issue.assigneeName ?? "Unassigned"))
         .when(Boolean(this.viewerId) && issue.assigneeId !== this.viewerId, (e) => e.child(
@@ -924,21 +1006,27 @@ export default class LinearProjects extends View {
   projectPage(t, cx) {
     const id = this.view.id, project = this.projects.find((p) => p.id === id);
     const issues = this.issuesByProject.get(id);
-    const shown = (issues ?? []).filter((i) => !this.mineOnly || i.assigneeId === this.viewerId);
-    const groups = groupBy(shown, ISSUE_GROUPS, (i) => i.stateType);
+    const filter = this.assigneeFilter;
+    const shown = (issues ?? []).filter((i) => !filter || i.assigneeId === (filter === "mine" ? this.viewerId : null));
+    const groups = issueGroups(shown);
     const space = activeSpace(), linked = space && links()[space.id] === id;
     const nameMatch = !linked && projectIdForSpace(space, this.projects, {}) === id;
     let body;
     if (this.pageError) body = this.message(this.pageError, t, true);
     else if (!issues) body = this.message("Loading…", t);
-    else if (!groups.length) body = this.message(this.mineOnly ? "No open issues assigned to you" : "No open issues", t);
+    else if (!groups.length) body = this.message(
+      filter === "mine" ? "No open issues assigned to you" : filter === "unassigned" ? "No open unassigned issues" : "No open issues", t);
+    const statusLine = project?.teamKey ? `${project.teamKey} issues in no project`
+      : `${project?.status ?? ""} · ${Math.round((project?.progress ?? 0) * 100)}%`;
+    const toggleFilter = (value) => { this.assigneeFilter = filter === value ? null : value; };
     return v_flex().size_full().min_h(0)
       .child(this.header(project?.name ?? "Project", t, { back: (cx) => this.go({ kind: "list" }, cx) }))
       .child(h_flex().flex_none().px(10).py(7).gap(6).items_center().border_b(1).border_color(t.border).text_size(11)
         .when(Boolean(project), (e) => e.child(this.dot(project?.statusColor, t))
-          .child(div().text_color(t.muted).child(`${project?.status ?? ""} · ${Math.round((project?.progress ?? 0) * 100)}%`)))
+          .child(div().text_color(t.muted).child(statusLine)))
         .child(div().flex_1())
-        .child(this.chip("filter-mine", "Mine", this.mineOnly, () => { this.mineOnly = !this.mineOnly; }, t))
+        .child(this.chip("filter-mine", "Mine", filter === "mine", () => toggleFilter("mine"), t))
+        .child(this.chip("filter-unassigned", "Unassigned", filter === "unassigned", () => toggleFilter("unassigned"), t))
         .when(Boolean(project) && !this.spacesByProject().has(id), (e) => e.child(this.button("create-space",
           this.creatingSpace.has(id) ? "Creating…" : "Create space", (cx) => this.createSpace(project, cx), t, { accent: true })))
         .when(Boolean(space) && !nameMatch, (e) => e.child(this.button("link", linked ? "Unlink" : "Link to this space", () => this.toggleLink(id), t)))
@@ -948,15 +1036,15 @@ export default class LinearProjects extends View {
       .child(v_flex().id("issue-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
         .when(Boolean(body), (e) => e.child(body))
         .children(groups.flatMap((g) => {
-          const key = `${id}:${g.type}`;
+          const key = `${id}:${g.key}`;
           if (this.collapsed.has(key)) return [this.issueGroupHeader(g, key, t)];
           return [this.issueGroupHeader(g, key, t), ...milestoneGroups(g.items).flatMap((m) =>
-            [this.milestoneHeading(m, g.type, t), ...m.items.map((i) => this.issueRow(i, t))])];
+            [this.milestoneHeading(m, g.key, t), ...m.items.map((i) => this.issueRow(i, t))])];
         })));
   }
 
   issueBack(issue, cx) {
-    const projectId = issue?.projectId ?? projectIdForSpace(activeSpace(), this.projects, links());
+    const projectId = this.projectIdOf(issue) ?? projectIdForSpace(activeSpace(), this.projects, links());
     this.go(projectId ? { kind: "project", id: projectId } : { kind: "list" }, cx);
   }
 
@@ -980,7 +1068,7 @@ export default class LinearProjects extends View {
         .when(Boolean(this.pageError), (e) => e.child(this.message(this.pageError ?? "", t, true)))
         .child(this.editable(issue, "title", div().whitespace_normal().text_size(15).font_semibold().child(issue.title), t))
         .child(h_flex().gap(8).items_center().text_size(11).text_color(t.dim)
-          .child(this.statusChip(issue, t)).child(div().child(facts))
+          .child(this.statusChip(issue, t)).children([this.slaChip(issue, t)].filter(Boolean)).child(div().child(facts))
           .when(issue.blockedBy.length > 0, (e) => e.child(div().text_color(t.ansi1).child(`⊘ Blocked by ${issue.blockedBy.join(", ")}`))))
         .when(issue.labels.length > 0, (e) => e.child(h_flex().flex_wrap().gap(5).text_size(11)
           .children(issue.labels.map((l) => div().px(5).rounded(4).border_1().border_color(`${l.color}88`).text_color(t.muted).child(l.name)))))
