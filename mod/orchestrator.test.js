@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readyIssues, parseWorktrees, worktreeSlug, issueTabs, startTask } from "./orchestrator.js";
+import { readyIssues, parseWorktrees, sweepCandidates, worktreeSlug, issueTabs, startTask } from "./orchestrator.js";
 
 const ME = "me";
 const issue = (identifier, fields = {}) => ({
@@ -62,4 +62,18 @@ test("start task carries the issue", () => {
   assert.match(text, /# CAL-1: Fix/);
   assert.match(text, /Ann, 2026-11-01:\nAlso this/);
   assert.match(text, /2 older comments/);
+});
+
+test("sweep candidates are unused linked worktrees on a branch under the root", () => {
+  const root = "/h/.herdr/worktrees";
+  const porcelain = [
+    "worktree /code/cal\nHEAD a\nbranch refs/heads/main",
+    `worktree ${root}/cal/done\nHEAD b\nbranch refs/heads/done`,
+    `worktree ${root}/cal/open-tab\nHEAD c\nbranch refs/heads/open-tab`,
+    `worktree ${root}/cal/project\nHEAD d\ndetached`,
+    "worktree /elsewhere/cal-x\nHEAD e\nbranch refs/heads/x",
+    `worktree ${root}/cal/done-2\nHEAD f\nbranch refs/heads/done-2`,
+  ].join("\n\n");
+  const openFolders = [`${root}/cal/open-tab/app/models`, `${root}/cal/done-2-other`];
+  assert.deepEqual(sweepCandidates(porcelain, { root, openFolders }).map((w) => w.branch), ["done", "done-2"]);
 });

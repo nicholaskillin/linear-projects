@@ -2,14 +2,14 @@
 // the issue it is named after. Clicks change the view only until the next space or tab switch.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar } from "gpui-base";
-import { spaces, agents, run, exec, home, appHome, readTextFile, shared, setShared, theme, nextCommand, props, openOverlay, notify } from "herdr";
+import { spaces, panes, agents, run, exec, home, appHome, readTextFile, shared, setShared, theme, nextCommand, props, openOverlay, notify } from "herdr";
 import { loadApiKey, gql } from "./api.js";
 import {
-  VIEWER_QUERY, TEAM_PROJECTS_QUERY, ASSIGN, UNASSIGN, UPDATE_ISSUE, PROJECT_ISSUES_QUERY, ISSUE_QUERY, ISSUE_STATE_QUERY, TEAM_STATES_QUERY, MAX_PAGES,
+  VIEWER_QUERY, TEAM_PROJECTS_QUERY, ASSIGN, UNASSIGN, UPDATE_ISSUE, PROJECT_ISSUES_QUERY, ISSUE_QUERY, ISSUE_STATE_QUERY, BRANCH_ISSUE_QUERY, TEAM_STATES_QUERY, MAX_PAGES,
   PROJECT_GROUPS, ACTIVE_PROJECT_TYPES, ISSUE_GROUPS, CLOSED_STATE_TYPES, parseProject, parseIssue, sortStates, groupBy,
   milestoneGroups, byName, identifierOf, projectIdForSpace, shortDate, ago,
 } from "./linear.js";
-import { issueTabs, readyIssues, parseWorktrees, worktreeSlug, startTask } from "./orchestrator.js";
+import { issueTabs, readyIssues, parseWorktrees, sweepCandidates, worktreeSlug, startTask } from "./orchestrator.js";
 import { StatusMenu, STATUS_MENU_WIDTH, statusMenuHeight } from "./status-menu.js";
 import { openUrl } from "./open.js";
 
@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = { maxAgents: 3, pollMinutes: 0, paused: false, repo: nu
 const POLL_STEPS = [0, 1, 2, 5, 10, 15, 30, 60, 90, 120]; // minutes; 0 is off
 const MAX_AGENTS_LIMIT = 10;
 const POLL_CHECK_MS = 15000;
+const SWEEP_MS = 30 * 60 * 1000;
 
 const settingsFor = (projectId) => ({ ...DEFAULT_SETTINGS, ...(shared(SETTINGS_KEY) ?? {})[projectId] });
 
@@ -159,6 +160,7 @@ export default class LinearProjects extends View {
     this.polling = new Set(); // project ids
     this.firstPoll = new Set(); // project ids whose new space gets a poll once it appears
     this.starting = new Set(); // issue identifiers
+    this.sweptAt = 0;
     this.repos = null; this.reposError = null; // null: not loaded yet
     // install.sh copies the repo's VERSION file into the mod's folder.
     cx.spawn(async (cx) => {
@@ -376,6 +378,7 @@ export default class LinearProjects extends View {
       await this.cleanUp(tabSpace, tab, issue.branchName);
       cleaned.push(ident);
     }
+    const swept = await this.sweepOrphans();
 
     const openTabs = tabs.length - cleaned.length;
     const tabIdents = new Set(spaces().flatMap((s) => s.tabs.map(identifierOf)).filter(Boolean));
@@ -389,7 +392,34 @@ export default class LinearProjects extends View {
       `${openTabs + started.length}/${maxAgents} agents`,
       started.length && `started ${started.join(", ")}`,
       cleaned.length && `cleaned up ${cleaned.join(", ")}`,
+      swept.length && `swept ${swept.length} old worktree${swept.length === 1 ? "" : "s"}`,
     ].filter(Boolean).join(" · ");
+  }
+
+  // `cleanUp` finds worktrees through their issue tab, so one whose tab was closed by hand stays. This
+  // removes those once their issue is closed, if nothing in Herdr is in them and they have no
+  // uncommitted changes. The branch stays. sweptAt is set first so that parallel polls sweep once.
+  async sweepOrphans() {
+    if (Date.now() - this.sweptAt < SWEEP_MS) return [];
+    this.sweptAt = Date.now();
+    const root = `${home()}/.herdr/worktrees`;
+    const openFolders = [...spaces().map((s) => s.folder), ...panes().map((p) => p.cwd)].filter(Boolean);
+    const swept = [];
+    for (const repo of this.repos ?? await listRepos()) {
+      const listed = await exec("git", ["-C", repoPath(repo), "worktree", "list", "--porcelain"]).catch(() => null);
+      if (listed?.code !== 0) continue;
+      const main = parseWorktrees(listed.stdout)[0].path;
+      for (const w of sweepCandidates(listed.stdout, { root, openFolders })) {
+        const status = await exec("git", ["-C", w.path, "status", "--porcelain"]).catch(() => null);
+        if (status?.code !== 0 || status.stdout.trim()) continue;
+        const issue = (await gql(this.apiKey, BRANCH_ISSUE_QUERY, { branch: w.branch }).catch(() => null))?.issueVcsBranchSearch;
+        if (!issue || !CLOSED_STATE_TYPES.includes(issue.state.type)) continue;
+        // git refuses a worktree with submodules unless forced; the status check above already found it clean.
+        try { await git(main, ["worktree", "remove", "--force", w.path]); swept.push(w.path); }
+        catch (e) { notify({ title: `Could not remove worktree for ${issue.identifier}`, body: String(e.message ?? e), level: "error" }); }
+      }
+    }
+    return swept;
   }
 
   // Closing the tab also ends its terminals, so a `box worktree server` there stops first. The local
@@ -428,7 +458,7 @@ export default class LinearProjects extends View {
       if (!base) throw new Error("the project has no space; create one first");
       const folder = issue.branchName ? await ensureWorktree(base, issue.branchName) : base;
       const full = parseIssue((await gql(this.apiKey, ISSUE_QUERY, { id: issue.identifier })).issue);
-      const tab = { name: issue.identifier, folder, argv: ["claude"], task: startTask(full) };
+      const tab = { name: issue.identifier, folder, argv: ["claude"], task: startTask(full), focus: false };
       if (otherRepo) await this.startInRepoSpace(project, repo, tab);
       else run("tab.new", { ...tab, space: space.id });
     } finally { this.starting.delete(issue.identifier); }
@@ -440,7 +470,7 @@ export default class LinearProjects extends View {
     const folder = await ensureProjectWorktree(repo, project);
     const existing = spaces().find((s) => s.folder === folder);
     if (existing) return run("tab.new", { ...tab, space: existing.id });
-    run("space.new", { name: worktreeSlug(project.name).toLowerCase(), folder });
+    run("space.new", { name: worktreeSlug(project.name).toLowerCase(), folder, focus: false });
     let space = null;
     for (let i = 0; i < 40 && !space; i++) { await sleep(0.25); space = spaces().find((s) => s.folder === folder); }
     if (!space) throw new Error(`Herdr did not open the new space for ${repo}`);

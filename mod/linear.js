@@ -41,6 +41,7 @@ export const ISSUE_QUERY = `query($id: String!) {
 }`;
 
 export const ISSUE_STATE_QUERY = `query($id: String!) { issue(id: $id) { identifier branchName state { type } } }`;
+export const BRANCH_ISSUE_QUERY = `query($branch: String!) { issueVcsBranchSearch(branchName: $branch) { identifier state { type } } }`;
 
 export const TEAM_STATES_QUERY = `query($id: String!) { team(id: $id) { states(first: 50) { nodes { id name type color position } } } }`;
 export const ASSIGN = `mutation($id: String!, $assigneeId: String!) { issueUpdate(id: $id, input: { assigneeId: $assigneeId }) { success } }`;

@@ -44,6 +44,14 @@ export function parseWorktrees(porcelain) {
   }).filter(Boolean);
 }
 
+const isInside = (folder, path) => folder === path || folder.startsWith(`${path}/`);
+
+// Linked worktrees under `root`, on a branch, that no open folder is in.
+export function sweepCandidates(porcelain, { root, openFolders }) {
+  return parseWorktrees(porcelain).slice(1)
+    .filter((w) => w.branch && w.path.startsWith(`${root}/`) && !openFolders.some((f) => isInside(f, w.path)));
+}
+
 export function startTask(issue) {
   const comments = issue.comments ?? [];
   const lines = [
