@@ -71,3 +71,15 @@ export function startTask(issue) {
   if (issue.moreComments) lines.push("", `${issue.moreComments} older comments are in Linear. Read them only if you need them.`);
   return lines.join("\n");
 }
+
+// The avatar colors that the stock spaces sidebar draws (its MARK names). ansi6 is its default for a
+// space with no color, so it goes last.
+export const SPACE_COLORS = ["ansi3", "ansi4", "ansi5", "ansi2", "ansi1", "ansi6"];
+
+// A project keeps its color. A new one gets the color that the fewest active projects have, the
+// earlier color on a tie. `assigned` is { "<project id>": "<color>" }; `active` is a Set of project IDs.
+export function colorFor(projectId, assigned, active) {
+  if (assigned[projectId]) return assigned[projectId];
+  const uses = (color) => Object.entries(assigned).filter(([id, c]) => c === color && active.has(id)).length;
+  return SPACE_COLORS.reduce((best, color) => (uses(color) < uses(best) ? color : best));
+}

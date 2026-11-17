@@ -11,6 +11,12 @@ cp "$HERE"/mod/* "$MOD"/
 cp "$HERE/VERSION" "$MOD/VERSION"
 echo "Mod installed:   $MOD (version $(cat "$HERE/VERSION"))"
 
+# The project-spaces sidebar is a mod of its own. It shows only once a layout uses it (see ./migrate.sh).
+SIDEBAR="$APP/mods/project-spaces"
+mkdir -p "$SIDEBAR"
+cp "$HERE"/sidebar/project-spaces/* "$SIDEBAR"/
+echo "Sidebar installed: $SIDEBAR"
+
 if [ -f "$SKILL/SKILL.md" ] && ! cmp -s "$HERE/skills/start-issue/SKILL.md" "$SKILL/SKILL.md"; then
   cp "$SKILL/SKILL.md" "$SKILL/SKILL.md.bak"
   echo "Your old start-issue skill is saved as $SKILL/SKILL.md.bak"
@@ -24,6 +30,10 @@ Next: add your Linear API key to $APP/linear.json:
 
 [ -f "$APP/linear-projects.json" ] || echo "
 Optional: $APP/linear-projects.json (see linear-projects.example.json)."
+
+grep -q '"mod": *"project-spaces"' "$APP"/layouts/*.json 2>/dev/null || echo "
+New: each issue gets a space of its own, grouped by project in the sidebar. To switch your layout
+and move your issue tabs, run ./migrate.sh while Herdr is open."
 
 echo "
 If the mod is not in your layout yet, add this block to your layout's panel column

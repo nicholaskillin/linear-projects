@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.0 (2026-11-17)
+
+Each issue gets a space of its own, issues can run on cloud agents, and a new sidebar groups issue spaces by project.
+
+- **One space for each issue.** An issue's agent now starts in a space named after the issue, in the issue's worktree, not as a tab in the project's space. Each project's issue spaces share one avatar color. When the issue is Done or Canceled, the poll closes its space and removes its worktree.
+- **Polls need no project space.** A project with polling turned on polls whether or not it has a space.
+- **Cloud agents.** "Run on" in the Agents box and on the issue page picks Local or Cloud, and `agentHost` in `linear-projects.json` sets the default. A cloud issue runs on its own cloud agent instance, added to Herdr as a machine. The poll terminates the instance when the issue closes, but only when nothing on it would be lost. See "Cloud agents" in the README.
+- **The `project-spaces` sidebar.** An optional copy of Herdr's spaces sidebar that shows issue spaces first, under one header for each project. `install.sh` installs it.
+- **`migrate.sh`.** Moves an existing setup: it switches your layouts to the new sidebar and moves your issue tabs into spaces of their own, with the agents still running. It asks before each step. The panel also offers a "Move them" button while old issue tabs are left.
+- **Project spaces join their project.** The space from "Create space", or a space you link to a project, now shows first under the project's header in the project-spaces sidebar, in the project's color. "Create space" also links the new space to its project, so the space stays with the project after a rename.
+- **Fix: a failed start set the issue In Progress.** Once, Herdr made no space for a started issue and reported no error. The mod still set the issue In Progress, so later polls, which start only Todo issues, skipped it. Now the mod waits up to 20 seconds for the issue's space. If no space opens, you get an error toast, and Linear does not change.
+- **Fix: a failed poll gave no reason.** A failed poll now shows an error toast with the reason.
+- **Fix: hidden buttons on the project page.** The row with the status, the filters and the buttons now wraps, so a narrow panel shows all the buttons.
+- Removed: the separate project space for issues in another repo. Each issue has its own space now.
+
 ## 1.2.0 (2026-11-16)
 
 Team views for issues in no project, separate status groups, SLAs, and starts that set In Progress. This version also fixes a poll that closed a project's space.

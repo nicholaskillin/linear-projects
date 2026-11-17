@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readyIssues, parseWorktrees, sweepCandidates, worktreeSlug, issueTabs, startTask } from "./orchestrator.js";
+import { readyIssues, parseWorktrees, sweepCandidates, worktreeSlug, issueTabs, startTask, colorFor, SPACE_COLORS } from "./orchestrator.js";
 
 const ME = "me";
 const issue = (identifier, fields = {}) => ({
@@ -76,4 +76,14 @@ test("sweep candidates are unused linked worktrees on a branch under the root", 
   ].join("\n\n");
   const openFolders = [`${root}/cal/open-tab/app/models`, `${root}/cal/done-2-other`];
   assert.deepEqual(sweepCandidates(porcelain, { root, openFolders }).map((w) => w.branch), ["done", "done-2"]);
+});
+
+test("a project keeps its color, and a new one gets the least used color", () => {
+  const active = new Set(["a", "b"]);
+  assert.equal(colorFor("a", { a: "ansi4" }, active), "ansi4");
+  assert.equal(colorFor("c", { a: SPACE_COLORS[0], b: SPACE_COLORS[1] }, active), SPACE_COLORS[2]);
+  assert.equal(colorFor("c", { a: SPACE_COLORS[0], old: SPACE_COLORS[1] }, active), SPACE_COLORS[1], "inactive projects free their color");
+  const all = Object.fromEntries(SPACE_COLORS.map((c, i) => [`p${i}`, c]));
+  const allActive = new Set(Object.keys(all));
+  assert.equal(colorFor("new", { ...all, p0b: SPACE_COLORS[0] }, new Set([...allActive, "p0b"])), SPACE_COLORS[1]);
 });

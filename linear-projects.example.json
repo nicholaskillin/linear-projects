@@ -1,5 +1,6 @@
 {
   "codeDir": "Code",
   "defaultRepo": "calendar",
+  "agentHost": "local",
   "teamViews": [{ "name": "Calendar Core", "team": "CAL" }]
 }

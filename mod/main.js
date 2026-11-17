@@ -2,7 +2,7 @@
 // the issue it is named after. Clicks change the view only until the next space or tab switch.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar } from "gpui-base";
-import { spaces, panes, agents, run, exec, home, appHome, readTextFile, shared, setShared, theme, nextCommand, props, openOverlay, notify } from "herdr";
+import { spaces, panes, agents, machines, run, exec, hc, home, appHome, readTextFile, shared, setShared, theme, nextCommand, props, openOverlay, notify } from "herdr";
 import { loadApiKey, gql } from "./api.js";
 import {
   VIEWER_QUERY, TEAM_PROJECTS_QUERY, ASSIGN, UNASSIGN, UPDATE_ISSUE, PROJECT_ISSUES_QUERY, ISSUE_QUERY, ISSUE_STATE_QUERY, BRANCH_ISSUE_QUERY, TEAM_STATES_QUERY, MAX_PAGES,
@@ -10,9 +10,10 @@ import {
   PROJECT_GROUPS, ACTIVE_PROJECT_TYPES, CLOSED_STATE_TYPES, parseProject, parseIssue, sortStates, groupBy, issueGroups,
   milestoneGroups, byName, identifierOf, projectIdForSpace, shortDate, ago, slaStatus, claimInput,
 } from "./linear.js";
-import { issueTabs, readyIssues, parseWorktrees, sweepCandidates, worktreeSlug, startTask } from "./orchestrator.js";
+import { issueTabs, readyIssues, parseWorktrees, sweepCandidates, worktreeSlug, startTask, colorFor } from "./orchestrator.js";
 import { StatusMenu, STATUS_MENU_WIDTH, statusMenuHeight } from "./status-menu.js";
 import { openUrl } from "./open.js";
+import { HOSTS, AWS_PROFILE, parseHost, machineName, isCloudSpace, setupScript, worktreeFrom, workCheckScript, workAtRisk } from "./cloud.js";
 
 const PROJECTS_REFRESH_MS = 5 * 60 * 1000;
 const LINKS_KEY = "linear-projects.links"; // { "<space id>": "<project id>" }
@@ -24,7 +25,7 @@ const links = () => shared(LINKS_KEY) ?? {};
 const isShown = (tab) => Boolean(tab?.active && tab.spaceId === activeSpace()?.id);
 
 const SETTINGS_KEY = "linear-projects.settings"; // { "<project id>": { maxAgents, pollMinutes, paused } }
-const DEFAULT_SETTINGS = { maxAgents: 3, pollMinutes: 0, paused: false, repo: null }; // repo null: the space's repo
+const DEFAULT_SETTINGS = { maxAgents: 3, pollMinutes: 0, paused: false, repo: null, host: null }; // repo null: the space's repo; host null: the default
 const POLL_STEPS = [0, 1, 2, 5, 10, 15, 30, 60, 90, 120]; // minutes; 0 is off
 const MAX_AGENTS_LIMIT = 10;
 const POLL_CHECK_MS = 15000;
@@ -53,7 +54,7 @@ function pollLabel(minutes) {
 // codeDir is under the home folder and holds the repos the repo menu lists. defaultRepo is the repo
 // "Create space" uses when the project has none; without it, the project must pick a repo first.
 const CONFIG_FILE = "linear-projects.json";
-const config = { codeDir: "Code", defaultRepo: null, teamViews: [] };
+const config = { codeDir: "Code", defaultRepo: null, teamViews: [], agentHost: "local" };
 
 async function loadConfig() {
   const text = await readTextFile(`${appHome()}/${CONFIG_FILE}`).catch(() => null);
@@ -63,6 +64,7 @@ async function loadConfig() {
   if (typeof raw?.codeDir === "string" && raw.codeDir.trim()) config.codeDir = raw.codeDir.trim().replace(/^~\//, "").replace(/\/+$/, "");
   if (typeof raw?.defaultRepo === "string" && raw.defaultRepo.trim()) config.defaultRepo = raw.defaultRepo.trim();
   config.teamViews = parseTeamViews(raw?.teamViews);
+  config.agentHost = parseHost(raw?.agentHost) ?? "local";
 }
 
 const codeDir = () => (config.codeDir.startsWith("/") ? config.codeDir : `${home()}/${config.codeDir}`);
@@ -77,6 +79,42 @@ function saveRepo(target, repo) {
     setShared(ISSUE_REPOS_KEY, repo ? { ...rest, [target.id]: repo } : rest);
   } else saveSettings(target.id, { repo });
 }
+
+const ISSUE_HOSTS_KEY = "linear-projects.issue-hosts"; // { "<issue identifier>": "local" | "cloud" }
+const ISSUE_PROJECTS_KEY = "linear-projects.issue-projects"; // { "<issue identifier>": "<project id>" }: which project an issue space counts for
+const PROJECT_COLORS_KEY = "linear-projects.project-colors"; // { "<project id>": "<space color>" }
+const PROJECT_NAMES_KEY = "linear-projects.project-names"; // { "<project id>": "<name>" }, for the project-spaces sidebar
+const PROJECT_SPACES_KEY = "linear-projects.project-spaces"; // { "<space id>": "<project id>" }: each project's own space, for the sidebar
+const SPACE_COLORS_KEY = "space.colors"; // the stock spaces sidebar's avatar colors: { "<space id>": "<color>" }
+
+// `target` is { kind: "project" | "issue", id }; a null host clears the choice.
+function saveHost(target, host) {
+  if (target.kind === "issue") {
+    const { [target.id]: _old, ...rest } = shared(ISSUE_HOSTS_KEY) ?? {};
+    setShared(ISSUE_HOSTS_KEY, host ? { ...rest, [target.id]: host } : rest);
+  } else saveSettings(target.id, { host });
+}
+
+function setIssueProject(ident, projectId) {
+  const { [ident]: _old, ...rest } = shared(ISSUE_PROJECTS_KEY) ?? {};
+  setShared(ISSUE_PROJECTS_KEY, projectId ? { ...rest, [ident]: projectId } : rest);
+}
+
+function forgetSpaceColor(spaceId) {
+  const { [spaceId]: _old, ...rest } = shared(SPACE_COLORS_KEY) ?? {};
+  setShared(SPACE_COLORS_KEY, rest);
+}
+
+// An issue space is a space named after an issue that the mod started, on this computer or on a cloud
+// instance. Its project comes from the record that the start made.
+const issueProjectOf = (space) => {
+  const ident = identifierOf(space);
+  return ident ? (shared(ISSUE_PROJECTS_KEY) ?? {})[ident] ?? null : null;
+};
+
+const nextHost = (current) => [null, ...HOSTS][([null, ...HOSTS].indexOf(current) + 1) % (HOSTS.length + 1)];
+// Remote repos sit in the same folder under the instance's home; an absolute local codeDir cannot apply there.
+const remoteCodeDir = () => (config.codeDir.startsWith("/") ? "Code" : config.codeDir);
 
 const sleep = (seconds) => exec("sleep", [String(seconds)]);
 
@@ -105,6 +143,9 @@ async function listRepos() {
     .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 }
 const AGENT_BUSY = ["working", "blocked"];
+const CLOUD_AGENT = "cloud-agent";
+const AWS_CHECK_MS = 5 * 60 * 1000;
+const AWS_EXPIRED = "Your AWS login for cloud agents has expired, or the aws command is missing. Run `pco aws-login`, then try again.";
 
 async function git(cwd, args, timeout = 30000) {
   const r = await exec("git", ["-C", cwd, ...args], { timeout });
@@ -163,6 +204,9 @@ export default class LinearProjects extends View {
     this.firstPoll = new Set(); // project ids whose new space gets a poll once it appears
     this.starting = new Set(); // issue identifiers
     this.sweptAt = 0;
+    this.notes = new Set(); // noteOnce keys
+    this.awsCheckedAt = 0;
+    this.startStage = new Map(); // issue identifier -> what a cloud start is doing, for its button
     this.repos = null; this.reposError = null; // null: not loaded yet
     // install.sh copies the repo's VERSION file into the mod's folder.
     cx.spawn(async (cx) => {
@@ -189,12 +233,15 @@ export default class LinearProjects extends View {
     this.assigneeFilter = null; // null, "mine" or "unassigned"
     this.collapsed = loadCollapsed();
     this.polls = new Map(); // project id -> { at, result }; the clock starts when the mod loads
-    cx.timer.every(POLL_CHECK_MS, (cx) => { this.pollDueProjects(cx); if (this.view.kind === "project") cx.notify(); });
+    cx.timer.every(1000, (cx) => { if (this.startStage.size) cx.notify(); });
+    cx.timer.every(POLL_CHECK_MS, (cx) => { this.syncSpaceColors(); this.pollDueProjects(cx); if (this.view.kind === "project") cx.notify(); });
     this.refreshProjects(cx);
     cx.timer.every(PROJECTS_REFRESH_MS, (cx) => this.refreshProjects(cx));
     cx.spawn(async (cx) => {
       for (;;) {
-        if (await nextCommand() === "refresh") { this.refreshProjects(cx); this.loadPage(cx); }
+        const command = await nextCommand();
+        if (command === "refresh") { this.refreshProjects(cx); this.loadPage(cx); }
+        else if (command === "move-issue-tabs") this.startMove(cx);
         cx.notify();
       }
     });
@@ -334,13 +381,16 @@ export default class LinearProjects extends View {
     return result;
   }
 
-  // The project's own space, then the spaces it got in other repos (their folder is a project worktree).
+  // The project's own space, then the spaces it got in other repos (their folder is a project worktree),
+  // then its issue spaces. The first two are from before each issue got its own space; their issue tabs
+  // still count and still get cleaned up.
   projectSpaces(projectId) {
     const main = this.spacesByProject().get(projectId), project = this.projects.find((p) => p.id === projectId);
-    if (!project) return main ? [main] : [];
+    const issueSpaces = spaces().filter((s) => s.id !== main?.id && issueProjectOf(s) === projectId);
+    if (!project) return [...(main ? [main] : []), ...issueSpaces];
     const suffix = `/${worktreeSlug(project.name).toLowerCase()}`, root = `${home()}/.herdr/worktrees/`;
-    const others = spaces().filter((s) => s !== main && s.id !== main?.id && s.folder?.startsWith(root) && s.folder.endsWith(suffix));
-    return main ? [main, ...others] : others;
+    const others = spaces().filter((s) => !s.machine && s.id !== main?.id && !issueProjectOf(s) && s.folder?.startsWith(root) && s.folder.endsWith(suffix));
+    return [...(main ? [main] : []), ...others, ...issueSpaces];
   }
 
   pollClock(projectId) {
@@ -348,9 +398,12 @@ export default class LinearProjects extends View {
     return this.polls.get(projectId);
   }
 
+  // Each issue has its own space, so a project needs no space to poll: a project with polling turned on
+  // polls, and so does one with a space (for the first poll of a new space).
   pollDueProjects(cx) {
-    const now = Date.now();
-    for (const [projectId] of this.spacesByProject()) {
+    const now = Date.now(), known = new Set(this.projects.map((p) => p.id));
+    const withPolls = Object.entries(shared(SETTINGS_KEY) ?? {}).filter(([, s]) => s?.pollMinutes > 0).map(([id]) => id);
+    for (const projectId of new Set([...this.spacesByProject().keys(), ...withPolls].filter((id) => known.has(id)))) {
       const { pollMinutes, paused } = settingsFor(projectId);
       if (this.firstPoll.delete(projectId)) this.poll(projectId, cx);
       else if (!paused && pollMinutes && now - this.pollClock(projectId).at >= pollMinutes * 60000) this.poll(projectId, cx);
@@ -369,20 +422,24 @@ export default class LinearProjects extends View {
   poll(projectId, cx) {
     const clock = { at: Date.now(), result: "polling…" };
     this.polls.set(projectId, clock);
-    const space = this.spacesByProject().get(projectId);
-    if (!space) clock.result = "skipped: no space";
-    else if (this.polling.has(projectId)) clock.result = "skipped: a poll is still running";
-    if (!space || this.polling.has(projectId)) return cx.notify();
+    if (this.polling.has(projectId)) {
+      clock.result = "skipped: a poll is still running";
+      return cx.notify();
+    }
     this.polling.add(projectId);
     cx.spawn(async (cx) => {
-      try { clock.result = await this.runPoll(projectId, space); }
-      catch (e) { clock.result = `failed: ${e.message ?? e}`; }
+      try { clock.result = await this.runPoll(projectId); }
+      catch (e) {
+        clock.result = `failed: ${e.message ?? e}`;
+        const name = this.projects.find((p) => p.id === projectId)?.name ?? "a project";
+        notify({ title: `The poll for ${name} failed`, body: String(e.message ?? e), level: "error" });
+      }
       finally { this.polling.delete(projectId); cx.notify(); }
     });
     cx.notify();
   }
 
-  async runPoll(projectId, space) {
+  async runPoll(projectId) {
     this.apiKey ??= await loadApiKey();
     if (!this.viewerId) throw new Error("your Linear user is not loaded yet");
     const { maxAgents } = settingsFor(projectId);
@@ -396,18 +453,19 @@ export default class LinearProjects extends View {
       if (!issue || !CLOSED_STATE_TYPES.includes(issue.state.type)) continue;
       const agent = agents().find((a) => a.tab === tab.id);
       if (agent && AGENT_BUSY.includes(agent.status)) continue; // try again at the next poll
-      if (await this.cleanUp(tabSpace, tab, issue.branchName, projectId)) cleaned.push(ident);
+      const done = isCloudSpace(tabSpace) ? await this.cleanUpCloud(tabSpace, ident)
+        : issueProjectOf(tabSpace) ? await this.cleanUpIssueSpace(tabSpace, ident, issue.branchName)
+        : await this.cleanUp(tabSpace, tab, issue.branchName, projectId);
+      if (done) cleaned.push(ident);
     }
     const swept = await this.sweepOrphans();
 
     const openTabs = tabs.length - cleaned.length;
     const tabIdents = new Set(spaces().flatMap((s) => s.tabs.map(identifierOf)).filter(Boolean));
     const picks = readyIssues(issues, { assigneeId: this.viewerId, tabIdents }).slice(0, Math.max(0, maxAgents - openTabs));
-    const startSpace = this.spacesByProject().get(projectId);
-    if (picks.length && !startSpace) throw new Error("the project's space closed during the poll");
     const started = [];
     for (const issue of picks) {
-      try { await this.startIssue(issue, startSpace, projectId); await this.claimOnStart(issue); started.push(issue.identifier); }
+      try { await this.startIssue(issue, this.spacesByProject().get(projectId) ?? null, projectId); await this.claimOnStart(issue); started.push(issue.identifier); }
       catch (e) { notify({ title: `Could not start ${issue.identifier}`, body: String(e.message ?? e), level: "error" }); }
     }
     return [
@@ -451,9 +509,23 @@ export default class LinearProjects extends View {
   async cleanUp(space, tab, branch, projectId) {
     if (!(await this.keepSpaceOpen(space, tab, projectId))) return false;
     run("tab.close", { id: tab.id, confirmed: true });
-    if (!branch) return true;
+    await this.removeWorktrees(branch, space.folder);
+    return true;
+  }
+
+  // Closing the space ends its terminals; the worktree goes after them, and the local branch stays.
+  async cleanUpIssueSpace(space, ident, branch) {
+    run("space.close", { id: space.id, confirmed: true });
+    forgetSpaceColor(space.id);
+    setIssueProject(ident, null);
+    await this.removeWorktrees(branch, space.folder);
+    return true;
+  }
+
+  async removeWorktrees(branch, nearFolder) {
+    if (!branch) return;
     const removed = new Set();
-    for (const folder of [space.folder, ...this.repos.map(repoPath)]) {
+    for (const folder of [nearFolder, ...(this.repos ?? await listRepos()).map(repoPath)]) {
       const listed = await exec("git", ["-C", folder, "worktree", "list", "--porcelain"]).catch(() => null);
       if (listed?.code !== 0) continue;
       const [main, ...worktrees] = parseWorktrees(listed.stdout);
@@ -462,6 +534,119 @@ export default class LinearProjects extends View {
         removed.add(w.path);
       }
     }
+  }
+
+  // A cloud issue's space and instance end together. Before that, the worktree on the instance must hold
+  // nothing that would be lost: terminating the instance deletes it. Until then the poll keeps it, and
+  // says why once.
+  async cleanUpCloud(space, ident) {
+    const machine = space.machine;
+    const check = await exec("bash", ["-lc", workCheckScript(space.folder)], { on: machine, timeout: 60000 }).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
+    let risk;
+    try {
+      if (check.code !== 0) throw new Error((check.stderr || check.stdout || "the check failed").trim());
+      risk = workAtRisk(check.stdout);
+    } catch (e) { this.noteOnce(`${ident}:check`, `Kept the cloud agent for ${ident}`, `Could not check its work for changes that are not pushed: ${e.message ?? e}`); return false; }
+    if (risk) { this.noteOnce(`${ident}:risk`, `Kept the cloud agent for ${ident}`, `Its worktree has ${risk}. Push or discard them, and the next poll ends the instance.`); return false; }
+    if (!(await this.awsLoggedIn())) { this.noteOnce(`${ident}:aws`, `Kept the cloud agent for ${ident}`, AWS_EXPIRED); return false; }
+    run("space.close", { id: space.id, confirmed: true });
+    forgetSpaceColor(space.id);
+    const r = await exec(CLOUD_AGENT, ["hc", "delete", "-s", machine], { timeout: 180000 }).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
+    if (r.code !== 0) notify({ title: `Closed ${ident}, but could not terminate its instance`, body: `${(r.stderr || r.stdout || "").trim()}\nRun: cloud-agent hc delete -s ${machine}`, level: "error" });
+    setIssueProject(ident, null);
+    return true;
+  }
+
+  // Each project has one avatar color, and its issue spaces wear it, so the sidebar shows which spaces
+  // belong together. This writes only what changed.
+  syncSpaceColors() {
+    const projectSpaces = [...this.spacesByProject()].map(([projectId, s]) => ({ s, projectId }));
+    const homes = Object.fromEntries(projectSpaces.map(({ s, projectId }) => [s.id, projectId]));
+    if (JSON.stringify(homes) !== JSON.stringify(shared(PROJECT_SPACES_KEY) ?? {})) setShared(PROJECT_SPACES_KEY, homes);
+    const issueSpaces = [...projectSpaces, ...spaces().map((s) => ({ s, projectId: issueProjectOf(s) })).filter((x) => x.projectId)];
+    if (!issueSpaces.length) return;
+    const saved = shared(PROJECT_COLORS_KEY) ?? {}, active = new Set(issueSpaces.map((x) => x.projectId));
+    const assigned = { ...saved };
+    for (const id of active) assigned[id] = colorFor(id, assigned, active);
+    if (Object.keys(assigned).length !== Object.keys(saved).length) setShared(PROJECT_COLORS_KEY, assigned);
+    const savedNames = shared(PROJECT_NAMES_KEY) ?? {};
+    const names = Object.fromEntries([...active].map((id) => [id, this.projects.find((p) => p.id === id)?.name ?? savedNames[id]]).filter(([, n]) => n));
+    if (JSON.stringify(names) !== JSON.stringify(savedNames)) setShared(PROJECT_NAMES_KEY, names);
+    const colors = shared(SPACE_COLORS_KEY) ?? {};
+    const changed = issueSpaces.filter(({ s, projectId }) => colors[s.id] !== assigned[projectId]);
+    if (changed.length) setShared(SPACE_COLORS_KEY, { ...colors, ...Object.fromEntries(changed.map(({ s, projectId }) => [s.id, assigned[projectId]])) });
+  }
+
+  startMove(cx) {
+    cx.spawn(async (cx) => { await this.moveIssueTabs(); this.syncSpaceColors(); cx.notify(); });
+    cx.notify();
+  }
+
+  // A one-time move from the old layout (`herdr-app do linear-projects.move-issue-tabs`): the issue tabs
+  // in project spaces move, with their running terminals, into spaces of their own.
+  // The command can arrive just after Herdr starts, before the project list that finds the tabs.
+  async moveIssueTabs() {
+    if (this.movingTabs) return;
+    this.movingTabs = true;
+    try {
+      for (let i = 0; i < 120 && !this.projectsLoaded; i++) await sleep(0.5);
+      if (!this.projectsLoaded || this.error) throw new Error(this.error ?? "the projects did not load");
+      this.apiKey ??= await loadApiKey();
+      const moved = [], failed = [];
+      for (const { tab, ident, projectId } of this.legacyIssueTabs()) {
+        try { await this.moveIssueTab(tab, ident, projectId); moved.push(ident); }
+        catch (e) { failed.push(`${ident}: ${e.message ?? e}`); }
+      }
+      notify({ title: moved.length ? `Moved ${moved.join(", ")} into spaces of their own` : "No issue tabs to move",
+        body: failed.join("\n") || undefined, level: failed.length ? "error" : "info" });
+    } catch (e) {
+      notify({ title: "Could not move the issue tabs", body: String(e.message ?? e), level: "error" });
+    } finally { this.movingTabs = false; }
+  }
+
+  // Issue tabs from before each issue got its own space: in a project's space on this computer.
+  legacyIssueTabs() {
+    return this.projects.flatMap((project) => this.projectSpaces(project.id)
+      .filter((s) => !s.machine && !issueProjectOf(s))
+      .flatMap((space) => issueTabs(space).map((t) => ({ ...t, projectId: project.id }))));
+  }
+
+  // Parking takes a terminal out of its pane without stopping it. Herdr then adopts a parked terminal
+  // into the space and tab that its labels name, and an ID it does not know becomes a new one.
+  async moveIssueTab(tab, ident, projectId) {
+    const terminals = panes().filter((p) => p.tab === tab.id && p.terminal).map((p) => p.terminal);
+    if (!terminals.length) throw new Error("its tab has no terminals");
+    const title = (await gql(this.apiKey, ISSUE_QUERY, { id: ident }).catch(() => null))?.issue?.title ?? "";
+    const hex = () => Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+    const spaceId = `sp${hex()}`, tabId = `tb${hex()}`;
+    setIssueProject(ident, projectId);
+    for (const terminal of terminals) run("terminal.park", { terminal });
+    await sleep(1);
+    for (const terminal of terminals) {
+      const r = await hc(["label", terminal, `herdr.space=${spaceId}`, `herdr.tab=${tabId}`]);
+      if (r.code !== 0) throw new Error(`could not label ${terminal}: ${(r.stderr || r.stdout || "").trim()}`);
+    }
+    let space = null;
+    for (let i = 0; i < 40 && !space; i++) { await sleep(0.25); space = spaces().find((s) => s.id === spaceId); }
+    if (!space) throw new Error(`its terminals (${terminals.join(", ")}) are parked but did not appear in a new space. Run terminal.keep on them to get them back.`);
+    run("space.rename", { id: spaceId, name: `${ident} ${title}`.trim() });
+    if (space.tabs[0]) run("tab.rename", { id: space.tabs[0].id, name: ident });
+  }
+
+  // A poll runs again and again, so a problem that waits on you shows its toast once per mod load.
+  noteOnce(key, title, body) {
+    if (this.notes.has(key)) return;
+    this.notes.add(key);
+    notify({ title, body, level: "error" });
+  }
+
+  // cloud-agent runs `pco aws-login` when the login has expired, and that opens a browser. A poll must
+  // never do that, so every cloud-agent call checks the login first. A good answer holds for 5 minutes.
+  async awsLoggedIn() {
+    if (Date.now() - this.awsCheckedAt < AWS_CHECK_MS) return true;
+    const r = await exec("aws", ["sts", "get-caller-identity", "--profile", AWS_PROFILE], { timeout: 30000 }).catch(() => null);
+    if (r?.code !== 0) return false;
+    this.awsCheckedAt = Date.now();
     return true;
   }
 
@@ -494,45 +679,86 @@ export default class LinearProjects extends View {
     return (shared(ISSUE_REPOS_KEY) ?? {})[ident] ?? (projectId && settingsFor(projectId).repo) ?? null;
   }
 
-  // An issue whose repo is not the project space's repo starts in the project's space for that repo,
-  // which this makes on first use.
+  // Each issue gets its own space, named after it, in its own worktree. `space` is the project's space,
+  // if it has one: its repo is the fallback when neither the issue nor the project picked a repo.
   async startIssue(issue, space, projectId = this.projectIdOf(issue) ?? projectIdForSpace(space, this.projects, links())) {
-    this.starting.add(issue.identifier);
+    if (this.hostFor(issue.identifier, projectId) === "cloud") return this.startCloud(issue, space, projectId);
+    const ident = issue.identifier;
+    this.starting.add(ident);
     try {
-      const project = this.projects.find((p) => p.id === projectId);
-      const repo = this.repoFor(issue.identifier, projectId);
-      const spaceRepo = space ? await repoNameOf(space.folder) : null;
-      const otherRepo = Boolean(repo && project && repo !== spaceRepo);
-      const base = repo ? repoPath(repo) : space?.folder;
-      if (!base) throw new Error("the project has no space; create one first");
-      const folder = issue.branchName ? await ensureWorktree(base, issue.branchName) : base;
-      const full = parseIssue((await gql(this.apiKey, ISSUE_QUERY, { id: issue.identifier })).issue);
-      const tab = { name: issue.identifier, folder, argv: ["claude"], task: startTask(full), focus: false };
-      if (otherRepo) await this.startInRepoSpace(project, repo, tab);
-      else run("tab.new", { ...tab, space: space.id });
-    } finally { this.starting.delete(issue.identifier); }
+      const repo = this.repoFor(ident, projectId) ?? (space && !space.machine ? await repoNameOf(space.folder) : null) ?? config.defaultRepo;
+      if (!repo) throw new Error("pick a repo for the project or the issue first (Repo)");
+      const folder = issue.branchName ? await ensureWorktree(repoPath(repo), issue.branchName) : repoPath(repo);
+      const full = parseIssue((await gql(this.apiKey, ISSUE_QUERY, { id: ident })).issue);
+      await this.openIssueSpace(ident, projectId, { name: `${ident} ${issue.title}`, tab: ident, folder, argv: ["claude"], task: startTask(full), focus: false });
+    } finally { this.starting.delete(ident); }
   }
 
-  // Herdr nests a space under the repo of its first terminal, so a new space keeps only the issue tab:
-  // the shell tab that space.new makes is closed once the issue tab is there.
-  async startInRepoSpace(project, repo, tab) {
-    const folder = await ensureProjectWorktree(repo, project);
-    const existing = spaces().find((s) => s.folder === folder);
-    if (existing) return run("tab.new", { ...tab, space: existing.id });
-    run("space.new", { name: worktreeSlug(project.name).toLowerCase(), folder, focus: false });
-    let space = null;
-    for (let i = 0; i < 40 && !space; i++) { await sleep(0.25); space = spaces().find((s) => s.folder === folder); }
-    if (!space) throw new Error(`Herdr did not open the new space for ${repo}`);
-    const shellTabs = space.tabs.map((t) => t.id);
-    run("tab.new", { ...tab, space: space.id });
+  // space.new reports nothing, and once it made no space with no error at all. The caller then set the
+  // issue In Progress, and the poll, which starts only Todo issues, never tried it again. Throwing here
+  // keeps the issue in Todo, so the next poll tries again.
+  async openIssueSpace(ident, projectId, args) {
+    if (projectId) setIssueProject(ident, projectId);
+    run("space.new", args);
     for (let i = 0; i < 40; i++) {
-      const now = spaces().find((s) => s.id === space.id);
-      if (now?.tabs.some((t) => identifierOf(t) === tab.name)) {
-        for (const id of shellTabs) run("tab.close", { id, confirmed: true });
-        return;
-      }
-      await sleep(0.25);
+      if (spaces().some((s) => s.tabs.some((t) => identifierOf(t) === ident))) return;
+      await sleep(0.5);
     }
+    setIssueProject(ident, null);
+    throw new Error("Herdr did not open the issue's space. Nothing changed in Linear, so the next poll tries again if the issue is in Todo.");
+  }
+
+  // The issue's own choice, else the project's, else the default from linear-projects.json.
+  hostFor(ident, projectId) {
+    return (shared(ISSUE_HOSTS_KEY) ?? {})[ident] ?? (projectId && settingsFor(projectId).host) ?? config.agentHost;
+  }
+
+  // One instance for each issue, added to Herdr as a machine named after the issue. Its space holds the
+  // issue's Claude tab, in a worktree on the instance. The space's name starts with the issue ID, so the
+  // poll and the Open button find it like a local issue tab.
+  async startCloud(issue, space, projectId) {
+    const ident = issue.identifier, machine = machineName(ident);
+    const stage = (text) => this.startStage.set(ident, text);
+    this.starting.add(ident);
+    try {
+      if (!issue.branchName) throw new Error("the issue has no branch name in Linear");
+      const repo = this.repoFor(ident, projectId) ?? (space && !space.machine ? await repoNameOf(space.folder) : null) ?? config.defaultRepo;
+      if (!repo) throw new Error("pick a repo for the project or the issue first (Repo)");
+      await this.refuseLocalWork(ident, repo, issue.branchName);
+      if (!(await this.awsLoggedIn())) throw new Error(AWS_EXPIRED);
+      if (!machines().some((m) => m.name === machine)) {
+        stage("Launching…");
+        const r = await exec(CLOUD_AGENT, ["hc", "launch", "-s", machine, "--new"], { timeout: 600000 })
+          .catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
+        if (r.code !== 0) throw new Error(`cloud-agent hc launch failed: ${(r.stderr || r.stdout || "").trim().split("\n").slice(-3).join(" ")}`);
+      }
+      stage("Connecting…");
+      await this.waitForMachine(machine);
+      stage("Setting up…");
+      const skill = await readTextFile(`${home()}/.claude/skills/start-issue/SKILL.md`);
+      const setup = await exec("bash", ["-lc", setupScript({ codeDir: remoteCodeDir(), repo, branch: issue.branchName, skill })], { on: machine, timeout: 300000 });
+      if (setup.code !== 0) throw new Error(`setup on ${machine} failed: ${(setup.stderr || setup.stdout).trim()}`);
+      const folder = worktreeFrom(setup.stdout);
+      const full = parseIssue((await gql(this.apiKey, ISSUE_QUERY, { id: ident })).issue);
+      await this.openIssueSpace(ident, projectId, { name: `${ident} ${issue.title}`, tab: ident, machine, folder, argv: ["claude"], task: startTask(full), focus: false });
+    } finally { this.starting.delete(ident); this.startStage.delete(ident); }
+  }
+
+  async waitForMachine(machine) {
+    for (let i = 0; i < 120; i++) {
+      if (machines().find((m) => m.name === machine)?.layout === "ready") return;
+      await sleep(0.5);
+    }
+    throw new Error(`Herdr could not reach the machine ${machine}`);
+  }
+
+  // A branch with local commits that origin does not have would start on the instance without them.
+  async refuseLocalWork(ident, repo, branch) {
+    const main = repoPath(repo);
+    const local = await exec("git", ["-C", main, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]).catch(() => null);
+    if (local?.code !== 0) return;
+    const count = Number((await git(main, ["rev-list", "--count", branch, "--not", "--remotes=origin"])).trim());
+    if (count > 0) throw new Error(`${ident} has ${count} local commit${count === 1 ? "" : "s"} on ${branch} that ${count === 1 ? "is" : "are"} not pushed. Push the branch, or start it locally.`);
   }
 
   // `me` false unassigns the issue.
@@ -574,8 +800,8 @@ export default class LinearProjects extends View {
 
   // Shown only when slots are free and none of your own issues is ready, so the next poll would start nothing.
   pickupSection(projectId, issues, t) {
-    const space = this.spacesByProject().get(projectId);
-    if (!space || !issues || !this.viewerId) return null;
+    const space = this.spacesByProject().get(projectId) ?? null;
+    if (!issues || !this.viewerId) return null;
     const free = settingsFor(projectId).maxAgents - this.projectSpaces(projectId).flatMap(issueTabs).length;
     const tabIdents = new Set(spaces().flatMap((s) => s.tabs.map(identifierOf)).filter(Boolean));
     if (free <= 0 || readyIssues(issues, { assigneeId: this.viewerId, tabIdents }).length) return null;
@@ -637,12 +863,14 @@ export default class LinearProjects extends View {
   }
 
   startLabel(issue, tab) {
-    return tab ? "Open" : this.starting.has(issue.identifier) ? "Starting…" : "Start";
+    if (tab) return "Open";
+    if (this.starting.has(issue.identifier)) return this.startStage.get(issue.identifier) ?? "Starting…";
+    return this.hostFor(issue.identifier, this.projectIdOf(issue) ?? (this.view.kind === "project" ? this.view.id : null)) === "cloud" ? "Start ☁" : "Start";
   }
 
-  // The space's worktree is detached at origin/main: it is only the space's home folder, and each issue
-  // gets its own worktree and branch. The space takes the project's name, so the name match finds it; a
-  // mod's run() does not return the new space's ID.
+  // The project's own space, for work that is not one issue. Its worktree is detached at origin/main,
+  // because each issue gets its own worktree and branch. The link keeps the space with its project after
+  // a rename. The sidebar shows it first under the project's header, above the issue spaces.
   createSpace(project, cx) {
     if (this.creatingSpace.has(project.id)) return;
     this.creatingSpace.add(project.id);
@@ -651,7 +879,11 @@ export default class LinearProjects extends View {
         const repo = settingsFor(project.id).repo ?? config.defaultRepo;
         if (!repo) throw new Error("Pick a repo for this project first (Agents › Repo)");
         const folder = await ensureProjectWorktree(repo, project);
+        const before = new Set(spaces().map((s) => s.id));
         run("space.new", { name: project.name, folder });
+        const space = await this.waitForNewSpace(before, project.name);
+        setShared(LINKS_KEY, { ...links(), [space.id]: project.id });
+        this.syncSpaceColors();
         this.firstPoll.add(project.id);
       } catch (e) {
         notify({ title: `Could not create a space for ${project.name}`, body: String(e.message ?? e), level: "error" });
@@ -660,11 +892,23 @@ export default class LinearProjects extends View {
     cx.notify();
   }
 
+  // run() does not return the new space's ID.
+  async waitForNewSpace(before, name) {
+    for (let i = 0; i < 40; i++) {
+      const space = spaces().find((s) => !before.has(s.id) && s.name === name);
+      if (space) return space;
+      await sleep(0.5);
+    }
+    throw new Error("Herdr did not open the space.");
+  }
+
   toggleLink(projectId) {
     const space = activeSpace();
     if (!space) return;
     const { [space.id]: current, ...rest } = links();
     setShared(LINKS_KEY, current === projectId ? rest : { ...rest, [space.id]: projectId });
+    if (current === projectId) forgetSpaceColor(space.id);
+    this.syncSpaceColors();
   }
 
   button(id, label, onClick, t, { accent = false } = {}) {
@@ -707,7 +951,9 @@ export default class LinearProjects extends View {
       .child(this.settingsGroup("agent-settings", "Agents", t, h_flex().flex_wrap().gap_x(10).gap_y(5).items_center()
         .child(this.stepper("max-agents", "Max", String(maxAgents),
           (dir) => saveSettings(projectId, { maxAgents: Math.min(MAX_AGENTS_LIMIT, Math.max(1, maxAgents + dir)) }), t))
-        .child(this.projectRepoChip(projectId, t, cx)))
+        .child(this.projectRepoChip(projectId, t, cx))
+        .child(this.hostChip("project-host", settingsFor(projectId).host ?? null, config.agentHost,
+          () => saveHost({ kind: "project", id: projectId }, nextHost(settingsFor(projectId).host ?? null)), t)))
         .children([this.repoPickerView("project", t)].filter(Boolean)))
       .child(this.settingsGroup("poll-settings", "Polling", t, v_flex().gap(5)
         .child(h_flex().flex_wrap().gap_x(10).gap_y(5).items_center()
@@ -779,6 +1025,17 @@ export default class LinearProjects extends View {
       .child(div().pl(15).text_size(11).text_color(t.dim).child(meta));
   }
 
+  // Shown while issue tabs from the old layout are left, so people who skip release notes see the move.
+  moveBar(t) {
+    if (!this.projectsLoaded) return null;
+    const count = this.legacyIssueTabs().length;
+    if (!count && !this.movingTabs) return null;
+    return h_flex().flex_none().px(10).py(7).gap(8).items_center().border_b(1).border_color(t.border).text_size(11)
+      .child(div().flex_1().min_w(0).whitespace_normal().text_color(t.muted)
+        .child(`${count} issue ${count === 1 ? "tab is" : "tabs are"} in project spaces. Each issue now gets a space of its own.`))
+      .child(this.button("move-issue-tabs", this.movingTabs ? "Moving…" : "Move them", (cx) => this.startMove(cx), t, { accent: true }));
+  }
+
   listPage(t) {
     const types = this.showAll ? PROJECT_GROUPS.map(([type]) => type) : ACTIVE_PROJECT_TYPES;
     const shown = this.projects.filter((p) => types.includes(p.statusType) && (!this.leadOnly || p.leadId === this.viewerId));
@@ -791,6 +1048,7 @@ export default class LinearProjects extends View {
     else if (!groups.length) body = this.message(this.leadOnly ? "You lead no projects here. Turn off Lead to see all." : "No projects", t);
     return v_flex().size_full().min_h(0)
       .child(this.header("Projects", t, { subtitle: this.projectsLoaded ? String(shown.length) : "", version: this.version }))
+      .children([this.moveBar(t)].filter(Boolean))
       .child(h_flex().flex_none().px(8).py(7).gap(6).border_b(1).border_color(t.border)
         .child(this.chip("filter-lead", "Lead", this.leadOnly, () => { this.leadOnly = !this.leadOnly; }, t))
         .child(this.chip("filter-all", "Show all", this.showAll, () => { this.showAll = !this.showAll; }, t)))
@@ -959,6 +1217,26 @@ export default class LinearProjects extends View {
       (cx) => this.openRepoPicker({ kind: "issue", id: issue.identifier }, current, fallback, cx), t);
   }
 
+  // A click moves to the next choice: the default, Local, Cloud. The default shows with "default" after it.
+  hostChip(id, current, fallback, onClick, t) {
+    const label = (host) => (host === "cloud" ? "Cloud" : "Local");
+    return h_flex().id(id).flex_none().h(22).px(6).gap(4).items_center().rounded(5).border_1().border_color(t.border)
+      .cursor_pointer().text_size(11).hover((s) => s.bg(t.raised))
+      .tooltip("Where new agents run: this computer, or a cloud agent instance for each issue. Click to change.")
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); onClick(); cx.notify(); })
+      .child(div().text_color(t.muted).child("Run on"))
+      .child(div().text_color(t.foreground).child(label(current ?? fallback)))
+      .when(!current, (e) => e.child(div().text_color(t.dim).child("default")));
+  }
+
+  issueHostChip(issue, t) {
+    const projectId = this.projectIdOf(issue) ?? projectIdForSpace(activeSpace(), this.projects, links());
+    const current = (shared(ISSUE_HOSTS_KEY) ?? {})[issue.identifier] ?? null;
+    const fallback = (projectId && settingsFor(projectId).host) || config.agentHost;
+    return this.hostChip("issue-host", current, fallback, () => saveHost({ kind: "issue", id: issue.identifier }, nextHost(current)), t);
+  }
+
   blockedIcon(issue, t) {
     if (!issue.blockedBy.length) return null;
     return div().id(`blocked-${issue.id}`).text_color(t.ansi1).tooltip(`Blocked by ${issue.blockedBy.join(", ")}`).child("⊘");
@@ -1021,14 +1299,15 @@ export default class LinearProjects extends View {
     const toggleFilter = (value) => { this.assigneeFilter = filter === value ? null : value; };
     return v_flex().size_full().min_h(0)
       .child(this.header(project?.name ?? "Project", t, { back: (cx) => this.go({ kind: "list" }, cx) }))
-      .child(h_flex().flex_none().px(10).py(7).gap(6).items_center().border_b(1).border_color(t.border).text_size(11)
+      // Wraps: a narrow panel cannot fit the status, both filters and up to three buttons on one line.
+      .child(h_flex().flex_none().flex_wrap().px(10).py(7).gap_x(6).gap_y(5).items_center().border_b(1).border_color(t.border).text_size(11)
         .when(Boolean(project), (e) => e.child(this.dot(project?.statusColor, t))
           .child(div().text_color(t.muted).child(statusLine)))
         .child(div().flex_1())
         .child(this.chip("filter-mine", "Mine", filter === "mine", () => toggleFilter("mine"), t))
         .child(this.chip("filter-unassigned", "Unassigned", filter === "unassigned", () => toggleFilter("unassigned"), t))
         .when(Boolean(project) && !this.spacesByProject().has(id), (e) => e.child(this.button("create-space",
-          this.creatingSpace.has(id) ? "Creating…" : "Create space", (cx) => this.createSpace(project, cx), t, { accent: true })))
+          this.creatingSpace.has(id) ? "Creating…" : "Create space", (cx) => this.createSpace(project, cx), t)))
         .when(Boolean(space) && !nameMatch, (e) => e.child(this.button("link", linked ? "Unlink" : "Link to this space", () => this.toggleLink(id), t)))
         .when(Boolean(project?.url), (e) => e.child(this.button("open-project", "Open in Linear", () => openUrl(project.url), t))))
       .child(this.orchestratorSettings(id, t, cx))
@@ -1075,6 +1354,7 @@ export default class LinearProjects extends View {
         .child(h_flex().flex_wrap().gap(6)
           .child(this.button("open-issue", "Open in Linear", () => openUrl(issue.url), t))
           .child(this.issueRepoChip(issue, t, cx))
+          .child(this.issueHostChip(issue, t))
           .when(Boolean(this.viewerId), (e) => e.child(this.assignButton(issue, t)))
           .when(!isShown(tab), (e) => e.child(this.button("issue-tab", tab ? "Open tab" : this.startLabel(issue, tab), (cx) => this.startTab(issue, cx), t, { accent: !tab }))))
         .children([this.repoPickerView("issue", t)].filter(Boolean))
