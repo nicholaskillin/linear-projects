@@ -1,5 +1,5 @@
 // A copy of Herdr's spaces sidebar (mod.clone of "spaces") that also groups issue spaces by project.
-// The linear-projects mod starts each issue in a space named after it, and records the issue's project
+// The Linear Queues mod (folder linear-queues) starts each issue in a space named after it, and records the issue's project
 // in shared state; those spaces show first, under one header for each project, on any machine. Every
 // other space shows as in the stock sidebar.
 //
@@ -36,7 +36,7 @@ const RAIL_CELL = 32;
 // stays readable instead of turning into an ellipsis next to a long branch.
 const SIDE_MIN = 48;
 const railCell = (el) => h_flex().flex_none().justify_center().child(el);
-// Written by the linear-projects mod.
+// Written by the Linear Queues mod. The keys keep the name it had before, linear-projects.
 const ISSUE_PROJECTS_KEY = "linear-projects.issue-projects"; // { "<issue identifier>": "<project id>" }
 const PROJECT_COLORS_KEY = "linear-projects.project-colors"; // { "<project id>": "<space color>" }
 const PROJECT_NAMES_KEY = "linear-projects.project-names"; // { "<project id>": "<name>" }

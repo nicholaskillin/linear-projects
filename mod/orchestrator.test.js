@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readyIssues, parseWorktrees, sweepCandidates, worktreeSlug, issueTabs, startTask, colorFor, SPACE_COLORS } from "./orchestrator.js";
+import { readyIssues, repoOfFolder, parseWorktrees, sweepCandidates, worktreeSlug, issueTabs, colorFor, SPACE_COLORS } from "./orchestrator.js";
 
 const ME = "me";
 const issue = (identifier, fields = {}) => ({
@@ -9,18 +9,21 @@ const issue = (identifier, fields = {}) => ({
 });
 const milestone = (name, sortOrder = 0) => ({ id: name, name, sortOrder });
 
-test("ready issues are my Todo issues with no tab and no open blocker", () => {
+test("ready issues are the issues the filter found that have no tab yet", () => {
+  const issues = [issue("CAL-1"), issue("CAL-5"), issue("CAL-6", { assigneeId: null })];
+  const ready = readyIssues(issues, { tabIdents: new Set(["CAL-5"]), viewerId: ME });
+  assert.deepEqual(ready.map((i) => i.identifier), ["CAL-1", "CAL-6"]);
+});
+
+test("my issues start before unassigned ones, and those before other people's", () => {
   const issues = [
-    issue("CAL-1"),
-    issue("CAL-2", { stateType: "started" }),
-    issue("CAL-3", { assigneeId: "someone" }),
-    issue("CAL-4", { blockedBy: ["CAL-1"] }),
-    issue("CAL-5"),
-    issue("CAL-6", { assigneeId: null }),
+    issue("theirs", { assigneeId: "ann", priority: 1 }),
+    issue("unassigned-urgent", { assigneeId: null, priority: 1 }),
+    issue("mine-low", { priority: 4 }),
+    issue("mine-urgent", { priority: 1 }),
   ];
-  const ready = readyIssues(issues, { assigneeId: ME, tabIdents: new Set(["CAL-5"]) });
-  assert.deepEqual(ready.map((i) => i.identifier), ["CAL-1"]);
-  assert.deepEqual(readyIssues(issues, { assigneeId: null, tabIdents: new Set() }).map((i) => i.identifier), ["CAL-6"]);
+  assert.deepEqual(readyIssues(issues, { tabIdents: new Set(), viewerId: ME }).map((i) => i.identifier),
+    ["mine-urgent", "mine-low", "unassigned-urgent", "theirs"]);
 });
 
 test("order: numbered milestones, unnumbered, none; then priority; then Linear order", () => {
@@ -33,7 +36,7 @@ test("order: numbered milestones, unnumbered, none; then priority; then Linear o
     issue("m2-urgent-second", { milestone: milestone("2. Feed"), priority: 1, sortOrder: 5 }),
     issue("m2-urgent-first", { milestone: milestone("2. Feed"), priority: 1, sortOrder: -5 }),
   ];
-  assert.deepEqual(readyIssues(issues, { assigneeId: ME, tabIdents: new Set() }).map((i) => i.identifier),
+  assert.deepEqual(readyIssues(issues, { tabIdents: new Set() }).map((i) => i.identifier),
     ["m2-urgent-first", "m2-urgent-second", "m2-low", "m2-nopriority", "m10", "unnumbered", "none"]);
 });
 
@@ -53,15 +56,6 @@ test("worktree slug follows Herdr's convention", () => {
 test("issue tabs are named tabs that start with an issue ID", () => {
   const space = { tabs: [{ name: "CAL-1 fix", named: true }, { name: "Orchestrator", named: true }, { name: "CAL-2", named: false }] };
   assert.deepEqual(issueTabs(space).map((t) => t.ident), ["CAL-1"]);
-});
-
-test("start task carries the issue", () => {
-  const text = startTask({ ...issue("CAL-1"), title: "Fix", branchName: "b", description: "Do it",
-    comments: [{ author: "Ann", createdAt: "2026-11-01T00:00:00Z", body: "Also this" }], moreComments: 2 });
-  assert.match(text, /^\/start-issue CAL-1\n/);
-  assert.match(text, /# CAL-1: Fix/);
-  assert.match(text, /Ann, 2026-11-01:\nAlso this/);
-  assert.match(text, /2 older comments/);
 });
 
 test("sweep candidates are unused linked worktrees on a branch under the root", () => {
@@ -86,4 +80,11 @@ test("a project keeps its color, and a new one gets the least used color", () =>
   const all = Object.fromEntries(SPACE_COLORS.map((c, i) => [`p${i}`, c]));
   const allActive = new Set(Object.keys(all));
   assert.equal(colorFor("new", { ...all, p0b: SPACE_COLORS[0] }, new Set([...allActive, "p0b"])), SPACE_COLORS[1]);
+});
+
+test("the repo of an issue space's folder", () => {
+  assert.equal(repoOfFolder("/Users/n/.herdr/worktrees/calendar/killin-cal-1-fix"), "calendar");
+  assert.equal(repoOfFolder("/home/ec2-user/Code/ChurchCenterApp"), "ChurchCenterApp");
+  assert.equal(repoOfFolder("/home/ec2-user/Code/calendar/"), "calendar");
+  assert.equal(repoOfFolder(null), null);
 });

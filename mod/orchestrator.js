@@ -1,4 +1,4 @@
-// Pure poll rules: which issues are ready, their order, worktree paths and the first message.
+// Pure poll rules: which issues are ready, their order, and worktree paths.
 // No Herdr imports, so `node --test` can load this file.
 import { identifierOf, milestoneNumber } from "./linear.js";
 
@@ -24,12 +24,18 @@ export function compareForPickup(a, b) {
     || a.sortOrder - b.sortOrder;
 }
 
-// `assigneeId` null asks for the unassigned issues.
-export function readyIssues(issues, { assigneeId, tabIdents }) {
+// Your issues first, then unassigned ones, then other people's (only when the filter allows them).
+const assigneeRank = (issue, viewerId) => (issue.assigneeId != null && issue.assigneeId === viewerId ? 0 : issue.assigneeId == null ? 1 : 2);
+
+// The order in which a poll starts issues: by assignee, then compareForPickup.
+export const pickupOrder = (viewerId) => (a, b) => assigneeRank(a, viewerId) - assigneeRank(b, viewerId) || compareForPickup(a, b);
+
+// The queue's filter decides which issues a poll may start; its default conditions keep to Todo issues
+// that are unassigned or yours and not blocked. A poll starts those that have no space yet.
+export function readyIssues(issues, { tabIdents, viewerId = null }) {
   return issues
-    .filter((i) => i.stateType === "unstarted" && i.assigneeId === assigneeId
-      && !tabIdents.has(i.identifier) && !i.blockedBy?.length)
-    .sort(compareForPickup);
+    .filter((i) => !tabIdents.has(i.identifier))
+    .sort(pickupOrder(viewerId));
 }
 
 // Herdr's worktree convention: ~/.herdr/worktrees/<repo>/<branch with other characters changed to ->.
@@ -52,26 +58,6 @@ export function sweepCandidates(porcelain, { root, openFolders }) {
     .filter((w) => w.branch && w.path.startsWith(`${root}/`) && !openFolders.some((f) => isInside(f, w.path)));
 }
 
-export function startTask(issue) {
-  const comments = issue.comments ?? [];
-  const lines = [
-    `/start-issue ${issue.identifier}`,
-    "",
-    "The mod already made your worktree, and this terminal starts in it. The issue is below, so do not get it from Linear.",
-    "",
-    `# ${issue.identifier}: ${issue.title}`,
-    `Branch: ${issue.branchName ?? "none"}`,
-  ];
-  if (issue.milestone) lines.push(`Milestone: ${issue.milestone.name}`);
-  lines.push("", issue.description?.trim() || "No description.");
-  if (comments.length) {
-    lines.push("", "## Comments, newest first");
-    for (const c of comments) lines.push("", `${c.author}, ${c.createdAt.slice(0, 10)}:`, c.body.trim());
-  }
-  if (issue.moreComments) lines.push("", `${issue.moreComments} older comments are in Linear. Read them only if you need them.`);
-  return lines.join("\n");
-}
-
 // The avatar colors that the stock spaces sidebar draws (its MARK names). ansi6 is its default for a
 // space with no color, so it goes last.
 export const SPACE_COLORS = ["ansi3", "ansi4", "ansi5", "ansi2", "ansi1", "ansi6"];
@@ -82,4 +68,12 @@ export function colorFor(projectId, assigned, active) {
   if (assigned[projectId]) return assigned[projectId];
   const uses = (color) => Object.entries(assigned).filter(([id, c]) => c === color && active.has(id)).length;
   return SPACE_COLORS.reduce((best, color) => (uses(color) < uses(best) ? color : best));
+}
+
+// The repo that an issue space's folder belongs to: a worktree under .herdr/worktrees/<repo>/…, or a
+// checkout named after the repo, as on a cloud instance. Null for no folder.
+export function repoOfFolder(folder) {
+  if (!folder) return null;
+  const parts = folder.replace(/\/+$/, "").split("/"), i = parts.indexOf("worktrees");
+  return i > 0 && parts[i - 1] === ".herdr" && parts[i + 1] ? parts[i + 1] : parts.at(-1) || null;
 }

@@ -3,7 +3,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 APP="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
-MOD="$APP/mods/linear-projects"
+MOD="$APP/mods/linear-queues"
 for f in "$HERE"/mod/*; do cp "$MOD/$(basename "$f")" "$f"; done
 cp "$HOME/.claude/skills/start-issue/SKILL.md" "$HERE/skills/start-issue/SKILL.md"
 for f in main.js mod.json; do cp "$APP/mods/project-spaces/$f" "$HERE/sidebar/project-spaces/$f"; done

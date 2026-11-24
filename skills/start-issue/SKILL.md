@@ -12,7 +12,7 @@ Do not commit, push, open a pull request, or change the issue in Linear. The use
 
 ## 1. Read the issue
 
-When the linear-projects mod starts you, the issue's title, branch, description, and latest comments follow the ID in `$ARGUMENTS`. Use them, and do not get the issue again from Linear. Read older comments with the Linear MCP tools only when the text says that there are more and you need them.
+When the Linear Queues mod starts you, the issue's title, branch, description, and latest comments follow the ID in `$ARGUMENTS`. Use them, and do not get the issue again from Linear. Read older comments with the Linear MCP tools only when the text says that there are more and you need them.
 
 When `$ARGUMENTS` holds only the ID, use the Linear MCP tools:
 
