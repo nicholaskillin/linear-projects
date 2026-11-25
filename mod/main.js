@@ -637,6 +637,27 @@ export default class LinearProjects extends View {
     return false;
   }
 
+  // An unreachable cloud machine whose instance AWS no longer has: nothing on it can be recovered, so a
+  // move skips the check for work that is not pushed. An unreachable instance that still exists (for
+  // example, while the AWS login has expired) keeps the check.
+  async instanceGone(machine) {
+    const listed = await hc(["machine", "ls", "--json"]).catch(() => null);
+    if (listed?.code !== 0) return false;
+    const entry = (JSON.parse(listed.stdout).machines ?? []).find((m) => m.name === machine);
+    const id = entry?.state === "unreachable" && entry.target?.match(/^cloud-agent-(i-[0-9a-f]+)$/)?.[1];
+    if (!id || !(await this.awsLoggedIn())) return false;
+    const r = await exec("aws", ["ec2", "describe-instances", "--profile", AWS_PROFILE, "--instance-ids", id,
+      "--query", "Reservations[].Instances[].State.Name", "--output", "json"], { timeout: 30000 }).catch(() => null);
+    if (r?.code !== 0) return /InvalidInstanceID\.NotFound/.test(r?.stderr ?? "");
+    return JSON.parse(r.stdout).every((state) => state === "terminated" || state === "shutting-down");
+  }
+
+  // A new start for the issue launches an instance only when no machine has its name.
+  async forgetMachine(machine) {
+    await hc(["machine", "rm", machine]).catch(() => null);
+    for (let i = 0; i < 20 && machines().some((m) => m.name === machine); i++) await sleep(0.5);
+  }
+
   // `cloud-agent hc delete` also removes the hc machine.
   async endInstance(machine, ident) {
     const r = await exec(CLOUD_AGENT, ["hc", "delete", "-s", machine], { timeout: 180000 }).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
@@ -837,19 +858,23 @@ export default class LinearProjects extends View {
         if (!node?.branchName) throw new Error("the issue has no branch name in Linear");
         const issue = parseIssue(node);
         stage("Checking for work that is not pushed");
-        const risk = fromHost === "cloud" ? await this.cloudWorkAtRisk(space, issue.branchName) : await this.localWorkAtRisk(space, issue.branchName);
+        const gone = fromHost === "cloud" && await this.instanceGone(space.machine);
+        const risk = gone ? null
+          : fromHost === "cloud" ? await this.cloudWorkAtRisk(space, issue.branchName) : await this.localWorkAtRisk(space, issue.branchName);
         if (risk) throw new Error(`it has ${risk}. Ask its agent to push, or discard the work, then move it again.`);
-        const keepInstance = fromHost === "cloud" && to.host === "cloud";
-        if (fromHost === "cloud" && !keepInstance && !(await this.awsLoggedIn())) throw new Error(AWS_EXPIRED);
+        const keepInstance = fromHost === "cloud" && to.host === "cloud" && !gone;
+        if (fromHost === "cloud" && !keepInstance && !gone && !(await this.awsLoggedIn())) throw new Error(AWS_EXPIRED);
         setIssueOverride(ident, to);
         stage("Closing its space");
         if (fromHost === "local") await this.cleanUpIssueSpace(space, ident, issue.branchName);
         else {
           run("space.close", { id: space.id, confirmed: true });
           forgetSpaceColor(space.id);
-          if (!keepInstance) { stage("Terminating its instance"); await this.endInstance(space.machine, ident); }
+          if (gone) { stage("Removing its machine, whose instance is gone"); await this.forgetMachine(space.machine); }
+          else if (!keepInstance) { stage("Terminating its instance"); await this.endInstance(space.machine, ident); }
         }
-        await this.startIssue(issue, queueId, report, { from: `${fromHost === "cloud" ? "a cloud instance" : "this computer"}, in ${fromRepo}` });
+        const from = fromHost === "local" ? "this computer" : gone ? "a cloud instance that no longer exists, so only its pushed work is left" : "a cloud instance";
+        await this.startIssue(issue, queueId, report, { from: `${from}, in ${fromRepo}` });
         notify({ title: `Moved ${ident}`, body: `It runs ${to.host === "cloud" ? "on a cloud instance" : "on this computer"}, in ${to.repo}.` });
       } catch (e) {
         const closed = !spaces().some((s) => s.id === space.id);
