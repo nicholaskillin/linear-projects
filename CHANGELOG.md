@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.1 (2026-11-25)
+
+### Fixes
+
+- **Move an issue whose cloud instance is gone.** When a cloud issue's machine is unreachable and AWS no longer has its instance, "Move ▾" no longer refuses with "could not check the instance". It skips the check for work that is not pushed, because nothing on the instance can be recovered. It removes the dead machine and starts the new agent from the pushed branch, and the agent's first message says that only the pushed work is left. An unreachable instance that still exists keeps the check.
+- **Shorter README.** The panel shows the details, and `CHANGELOG.md` has the rest.
+
 ## 2.0.0 (2026-11-24)
 
 Linear Projects is now **Linear Queues**: a settings panel for queues of Linear issues that agents work through. A queue is any Linear issue filter, edited as conditions in the panel, with its own agents and polling. To read and change issues, use the `linear` mod from planningcenter/herdr-mods.
